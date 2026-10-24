@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  zentao-app:
+    build: .
+    container_name: zentao-app
+    restart: always
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./config.ini:/app/config.ini

@@ -1,0 +1,1255 @@
+# -*- coding: utf-8 -*-
+"""
+禅道 API 客户端核心模块 (ZenTao Client Core)
+封装博科国信云禅道及标准禅道系统的 API 调用。
+"""
+
+import os
+import re
+import json
+import time
+import requests
+import configparser
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+class ZentaoClient:
+    def __init__(self, base_url, account, password):
+        self.base_url = base_url.rstrip('/')
+        self.account = account
+        self.password = password
+        self.session = requests.Session()
+        
+        # 挂载自动重试与长连接连接池保护
+        retries = Retry(
+            total=3,
+            backoff_factor=0.5,
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["GET", "POST", "HEAD"]
+        )
+        adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=20)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "X-Requested-With": "XMLHttpRequest"
+        })
+        self.realname = ""
+        self.user_info = {}
+        self._account_to_uid = {}
+        self._uid_to_account = {}
+        self.login()
+
+    def _req(self, method, url, **kwargs):
+        """
+        统一 HTTP 请求封装，带断线重连、Keep-Alive 闲置超时自动恢复与重试机制。
+        解决批量处理长间隔休眠（如 5s）时远端关闭 TCP 连接导致的 RemoteDisconnected / ConnectionError 问题。
+        """
+        if 'timeout' not in kwargs:
+            kwargs['timeout'] = 15
+
+        last_exc = None
+        for attempt in range(3):
+            try:
+                if method.upper() == 'GET':
+                    return self.session.get(url, **kwargs)
+                else:
+                    return self.session.post(url, **kwargs)
+            except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError, requests.exceptions.Timeout) as e:
+                last_exc = e
+                # 远端 Keep-Alive 闲置超时主动断开连接，关闭旧连接池以便重开干净的 TCP 握手
+                try:
+                    self.session.close()
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            except Exception as e:
+                raise e
+
+        if last_exc:
+            raise last_exc
+
+    def login(self):
+        """登录禅道并保存会话"""
+        # 1. 获取 SessionID
+        try:
+            sess_url = f"{self.base_url}/api-getSessionID.json"
+            r_sess = self._req('GET', sess_url, timeout=10)
+            if r_sess.status_code == 200:
+                data = r_sess.json()
+                raw_data = data.get('data')
+                if raw_data:
+                    session_obj = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
+                    if 'sessionID' in session_obj:
+                        self.session.cookies.set('zentaosid', session_obj['sessionID'])
+        except Exception:
+            pass
+
+        # 2. 调用 user-login.json 登录
+        login_url = f"{self.base_url}/user-login.json"
+        res = self._req('POST', login_url, data={"account": self.account, "password": self.password}, timeout=10)
+        if res.status_code == 200:
+            res_data = res.json()
+            if res_data.get("status") == "success":
+                self.user_info = res_data.get("user", {})
+                # 自动将用户输入的 account 校准为禅道系统官方标准的 account (避免大小写输入差异)
+                official_acc = self.user_info.get("account")
+                if official_acc:
+                    self.account = official_acc
+                self.realname = self.user_info.get("realname", self.account)
+                token = self.user_info.get("token")
+                if token:
+                    self.session.headers.update({"Token": token})
+                return True
+            else:
+                reason = res_data.get("message") or res_data.get("reason") or res.text
+                raise RuntimeError(f"登录失败: {reason}")
+        else:
+            raise RuntimeError(f"HTTP 请求异常: 状态码 {res.status_code}")
+
+    def _parse_data(self, response):
+        """解析禅道统一返回的 data 字段"""
+        try:
+            res_json = response.json()
+            raw = res_json.get('data', '{}')
+            if isinstance(raw, str):
+                return json.loads(raw)
+            return raw
+        except Exception:
+            return {}
+
+    def get_my_tasks(self, view_type="assignedTo", fetch_all=True):
+        """获取我的任务列表 (assignedTo, openedBy, finishedBy, closedBy, all)"""
+        url = f"{self.base_url}/my-task-{view_type}-id_desc-0-1000-1.json"
+        res = self._req('GET', url, timeout=15)
+        data = self._parse_data(res)
+        raw_tasks = data.get('tasks', [])
+        tasks = list(raw_tasks.values()) if isinstance(raw_tasks, dict) else list(raw_tasks)
+        users = data.get('users', {}) or {}
+
+        pager = data.get('pager')
+        if fetch_all and pager and isinstance(pager, dict):
+            page_total = pager.get('pageTotal', 1)
+            rec_per_page = pager.get('recPerPage', 1000)
+            if page_total > 1:
+                all_tasks = list(tasks)
+                for page_id in range(2, page_total + 1):
+                    p_url = f"{self.base_url}/my-task-{view_type}-id_desc-0-{rec_per_page}-{page_id}.json"
+                    p_res = self._req('GET', p_url, timeout=15)
+                    p_data = self._parse_data(p_res)
+                    p_tasks = p_data.get('tasks', [])
+                    if isinstance(p_tasks, dict):
+                        p_tasks = list(p_tasks.values())
+                    all_tasks.extend(p_tasks)
+                    p_users = p_data.get('users', {}) or {}
+                    if isinstance(p_users, dict):
+                        users.update(p_users)
+                tasks = all_tasks
+
+        # 补全真实姓名显示
+        for t in tasks:
+            if isinstance(t, dict):
+                fb = t.get('finishedBy', '')
+                if fb and not t.get('finishedByRealname'):
+                    t['finishedByRealname'] = users.get(fb, fb)
+                assigned = t.get('assignedTo', '')
+                if assigned and not t.get('assignedToRealname'):
+                    t['assignedToRealname'] = users.get(assigned, assigned)
+
+        return tasks
+
+    def get_all_projects(self):
+        """实时查询所有项目列表"""
+        url = f"{self.base_url}/project-all.json"
+        res = self._req('GET', url, timeout=10)
+        data = self._parse_data(res)
+        projs = data.get('projects', {})
+        proj_list = []
+        if isinstance(projs, dict):
+            for pid, pname in projs.items():
+                if pid and pname:
+                    proj_list.append({"id": str(pid), "name": str(pname)})
+        elif isinstance(projs, list):
+            for p in projs:
+                if isinstance(p, dict):
+                    proj_list.append({"id": str(p.get('id')), "name": str(p.get('name'))})
+        
+        # 按 ID 倒序排列，最新创建的项目排在前面
+        try:
+            proj_list.sort(key=lambda x: int(x['id']), reverse=True)
+        except Exception:
+            pass
+        return proj_list
+
+    def get_uid_by_account(self, account):
+        """根据用户 account 查找其在禅道中的数字 UID"""
+        if not account:
+            return None
+        # 如果本身就是纯数字
+        if str(account).isdigit():
+            return int(account)
+        # 如果是当前登录用户
+        if self.account and str(account).lower() == self.account.lower():
+            if self.user_info.get('id'):
+                return int(self.user_info['id'])
+        # 查字典
+        if not self._account_to_uid:
+            self.get_all_users()
+        uid = self._account_to_uid.get(account)
+        if not uid:
+            # 大小写不敏感匹配
+            for acc, u in self._account_to_uid.items():
+                if acc.lower() == str(account).lower():
+                    return u
+        return uid
+
+    def get_user_tasks(self, account=None, view_type="assignedTo", fetch_all=True):
+        """
+        获取指定用户的任务列表。
+        支持 view_type: assignedTo, finishedBy, openedBy, closedBy, all
+        若 account 为空或等于当前登录账号，自动调用 get_my_tasks。
+        若为其他用户，通过禅道原生 /user-task-{uid}-{view_type}.json 进行全量/分页抓取。
+        """
+        if not account or (self.account and str(account).lower() == self.account.lower()):
+            return self.get_my_tasks(view_type=view_type, fetch_all=fetch_all)
+
+        uid = self.get_uid_by_account(account)
+        if not uid:
+            print(f"Warning: Cannot resolve UID for user account '{account}'")
+            return []
+
+        # 禅道原生 user-task 支持 assignedTo, finishedBy, openedBy, closedBy, canceledBy
+        # 若用户选择 'all'，合并抓取 assignedTo 与 finishedBy，并按 task id 去重
+        if view_type == 'all':
+            tasks_assigned = self._fetch_user_tasks_by_type(uid, 'assignedTo', fetch_all)
+            tasks_finished = self._fetch_user_tasks_by_type(uid, 'finishedBy', fetch_all)
+            task_dict = {}
+            for t in tasks_assigned + tasks_finished:
+                tid = t.get('id')
+                if tid and tid not in task_dict:
+                    task_dict[tid] = t
+            return list(task_dict.values())
+        else:
+            return self._fetch_user_tasks_by_type(uid, view_type, fetch_all)
+
+    def _fetch_user_tasks_by_type(self, uid, view_type, fetch_all=True):
+        rec_per_page = 100
+        url = f"{self.base_url}/user-task-{uid}-{view_type}-id_desc-{rec_per_page}-1.json"
+        res = self._req('GET', url, timeout=15)
+        data = self._parse_data(res)
+        raw_tasks = data.get('tasks', [])
+        tasks = list(raw_tasks.values()) if isinstance(raw_tasks, dict) else list(raw_tasks)
+        users = data.get('users', {}) or {}
+
+        # 严格按任务 ID 去重
+        task_dict = {}
+        for t in tasks:
+            if isinstance(t, dict) and t.get('id'):
+                task_dict[str(t['id'])] = t
+
+        pager = data.get('pager')
+        if fetch_all and pager and isinstance(pager, dict):
+            page_total = int(pager.get('pageTotal', 1) or 1)
+            # 安全防呆：每页 100 条，最多抓取前 10 页 (即最多 1000 条任务)
+            max_pages = min(page_total, 10)
+            if max_pages > 1:
+                for page_id in range(2, max_pages + 1):
+                    p_url = f"{self.base_url}/user-task-{uid}-{view_type}-id_desc-{rec_per_page}-{page_id}.json"
+                    p_res = self._req('GET', p_url, timeout=10)
+                    p_data = self._parse_data(p_res)
+                    p_tasks = p_data.get('tasks', [])
+                    if isinstance(p_tasks, dict):
+                        p_tasks = list(p_tasks.values())
+                    for t in p_tasks:
+                        if isinstance(t, dict) and t.get('id'):
+                            task_dict[str(t['id'])] = t
+                    p_users = p_data.get('users', {}) or {}
+                    if isinstance(p_users, dict):
+                        users.update(p_users)
+
+        tasks = list(task_dict.values())
+
+        # 补全真实姓名
+        for t in tasks:
+            if isinstance(t, dict):
+                fb = t.get('finishedBy', '')
+                if fb and not t.get('finishedByRealname'):
+                    t['finishedByRealname'] = users.get(fb, fb)
+                assigned = t.get('assignedTo', '')
+                if assigned and not t.get('assignedToRealname'):
+                    t['assignedToRealname'] = users.get(assigned, assigned)
+                opened = t.get('openedBy', '')
+                if opened and not t.get('openedByRealname'):
+                    t['openedByRealname'] = users.get(opened, opened)
+                closed = t.get('closedBy', '')
+                if closed and not t.get('closedByRealname'):
+                    t['closedByRealname'] = users.get(closed, closed)
+
+        return tasks
+
+    def get_all_users(self):
+        """
+        获取系统中的所有用户列表，格式统一为:
+        [{"account": "admin", "realname": "管理员", "id": 1}, {"account": "zhangsan", "realname": "张三", "id": 10}, ...]
+        采用多重策略兜底，并解析精准的数字 UID 映射，兼容各类云禅道与标准私有化禅道版本。
+        """
+        user_map = {}  # account -> realname
+
+        # 策略 1: 尝试调用组织/用户相关接口
+        endpoints = [
+            f"{self.base_url}/company-browse-0-0-id_desc-1000-1.json",
+            f"{self.base_url}/company-browse.json",
+            f"{self.base_url}/user-manage.json",
+            f"{self.base_url}/api-getModel-user-getList.json",
+            f"{self.base_url}/user-contacts.json"
+        ]
+        for url in endpoints:
+            try:
+                res = self._req('GET', url, timeout=8)
+                data = self._parse_data(res)
+                if isinstance(data, dict):
+                    raw_users = data.get('users')
+                    if isinstance(raw_users, list):
+                        for u in raw_users:
+                            if isinstance(u, dict) and u.get('account'):
+                                acc = str(u.get('account')).strip()
+                                rname = str(u.get('realname') or acc).strip()
+                                if acc and acc != 'closed':
+                                    user_map[acc] = rname
+                    elif isinstance(raw_users, dict):
+                        for acc, rname in raw_users.items():
+                            acc_str = str(acc).strip()
+                            if acc_str and acc_str != 'closed':
+                                user_map[acc_str] = str(rname or acc_str).strip()
+                if len(user_map) >= 2:
+                    break
+            except Exception:
+                continue
+
+        # 策略 2: 如果策略 1 未获取到足够用户，从常用任务接口中提取自带的 users 全局映射字典
+        if len(user_map) < 2:
+            try:
+                fallback_urls = [
+                    f"{self.base_url}/my-task-all-id_desc-0-100-1.json",
+                    f"{self.base_url}/my-task-assignedTo-id_desc-0-100-1.json"
+                ]
+                for f_url in fallback_urls:
+                    res = self._req('GET', f_url, timeout=8)
+                    data = self._parse_data(res)
+                    if isinstance(data, dict):
+                        users_dict = data.get('users', {})
+                        if isinstance(users_dict, dict):
+                            for acc, rname in users_dict.items():
+                                acc_str = str(acc).strip()
+                                if acc_str and acc_str != 'closed':
+                                    user_map[acc_str] = str(rname or acc_str).strip()
+                    if user_map:
+                        break
+            except Exception:
+                pass
+
+        # 确保当前登录用户在列表中
+        if self.account and self.account not in user_map:
+            user_map[self.account] = self.realname or self.account
+
+        # 策略 3: 解析 user-task 返回的 userList 下拉选框，精准提取每一个用户的数字 UID 与姓名
+        try:
+            my_uid = (self.user_info.get('id') if isinstance(self.user_info, dict) else None) or 157
+            if self.account and self.user_info.get('id'):
+                self._account_to_uid[self.account] = int(self.user_info['id'])
+                self._uid_to_account[int(self.user_info['id'])] = self.account
+
+            url = f"{self.base_url}/user-task-{my_uid}.json"
+            res = self._req('GET', url, timeout=8)
+            data = self._parse_data(res)
+            user_list_str = data.get('userList', '')
+            if user_list_str:
+                pattern = re.compile(r"<option\s+value='(\d+)'(?:\s+selected='selected')?(?:\s+title='([^']*)')?(?:\s+data-keys='([^']*)')?>([^<]*)</option>")
+                matches = pattern.findall(user_list_str)
+                for uid_str, title, keys, text in matches:
+                    uid_val = int(uid_str)
+                    clean_text = text.strip()
+                    if ':' in clean_text:
+                        clean_text = clean_text.split(':', 1)[1].strip()
+                    for acc, rname in user_map.items():
+                        if rname == clean_text:
+                            self._account_to_uid[acc] = uid_val
+                            self._uid_to_account[uid_val] = acc
+                            break
+        except Exception as e:
+            print(f"Resolve userList UID error: {e}")
+
+        # 转换并按姓名/账号排序
+        user_list = []
+        for acc, rname in user_map.items():
+            uid_val = self._account_to_uid.get(acc)
+            user_list.append({
+                "account": acc,
+                "realname": rname,
+                "id": uid_val
+            })
+
+        try:
+            user_list.sort(key=lambda x: (x['realname'], x['account']))
+        except Exception:
+            pass
+
+        return user_list
+
+    def get_project_tasks(self, project_id, fetch_all=True):
+        """获取指定项目下的所有任务 (包含未开始、进行中、已完成、已关闭的全量任务)"""
+        url = f"{self.base_url}/project-task-{project_id}-all-0--id_desc-1000-1.json"
+        res = self._req('GET', url, timeout=15)
+        data = self._parse_data(res)
+        raw_tasks = data.get('tasks', [])
+        tasks = list(raw_tasks.values()) if isinstance(raw_tasks, dict) else list(raw_tasks)
+        users = data.get('users', {}) or {}
+
+        pager = data.get('pager')
+        if fetch_all and pager and isinstance(pager, dict):
+            page_total = pager.get('pageTotal', 1)
+            rec_per_page = pager.get('recPerPage', 1000)
+            if page_total > 1:
+                for page_id in range(2, page_total + 1):
+                    p_url = f"{self.base_url}/project-task-{project_id}-all-0--id_desc-{rec_per_page}-{page_id}.json"
+                    p_res = self._req('GET', p_url, timeout=15)
+                    p_data = self._parse_data(p_res)
+                    p_tasks = p_data.get('tasks', [])
+                    if isinstance(p_tasks, dict):
+                        p_tasks = list(p_tasks.values())
+                    tasks.extend(p_tasks)
+                    # 合并 users 字典
+                    p_users = p_data.get('users', {}) or {}
+                    if isinstance(p_users, dict):
+                        users.update(p_users)
+
+        # 补全真实姓名显示
+        for t in tasks:
+            if isinstance(t, dict):
+                fb = t.get('finishedBy', '')
+                if fb and not t.get('finishedByRealname'):
+                    t['finishedByRealname'] = users.get(fb, fb)
+                assigned = t.get('assignedTo', '')
+                if assigned and not t.get('assignedToRealname'):
+                    t['assignedToRealname'] = users.get(assigned, assigned)
+
+        return tasks
+
+    def get_execution_tasks(self, execution_id, fetch_all=True):
+        """获取指定执行/迭代下的所有任务 (全量包含已关闭)"""
+        url = f"{self.base_url}/execution-task-{execution_id}-all-0--id_desc-1000-1.json"
+        res = self._req('GET', url, timeout=15)
+        data = self._parse_data(res)
+        raw_tasks = data.get('tasks', [])
+        tasks = list(raw_tasks.values()) if isinstance(raw_tasks, dict) else list(raw_tasks)
+        users = data.get('users', {}) or {}
+
+        pager = data.get('pager')
+        if fetch_all and pager and isinstance(pager, dict):
+            page_total = pager.get('pageTotal', 1)
+            rec_per_page = pager.get('recPerPage', 1000)
+            if page_total > 1:
+                for page_id in range(2, page_total + 1):
+                    p_url = f"{self.base_url}/execution-task-{execution_id}-all-0--id_desc-{rec_per_page}-{page_id}.json"
+                    p_res = self._req('GET', p_url, timeout=15)
+                    p_data = self._parse_data(p_res)
+                    p_tasks = p_data.get('tasks', [])
+                    if isinstance(p_tasks, dict):
+                        p_tasks = list(p_tasks.values())
+                    tasks.extend(p_tasks)
+                    p_users = p_data.get('users', {}) or {}
+                    if isinstance(p_users, dict):
+                        users.update(p_users)
+
+        for t in tasks:
+            if isinstance(t, dict):
+                fb = t.get('finishedBy', '')
+                if fb and not t.get('finishedByRealname'):
+                    t['finishedByRealname'] = users.get(fb, fb)
+                assigned = t.get('assignedTo', '')
+                if assigned and not t.get('assignedToRealname'):
+                    t['assignedToRealname'] = users.get(assigned, assigned)
+
+        return tasks
+
+    def get_task_detail(self, task_id):
+        """获取指定任务的详细数据"""
+        url = f"{self.base_url}/task-view-{task_id}.json"
+        res = self._req('GET', url, timeout=10)
+        data = self._parse_data(res)
+        return data.get('task', {})
+
+    def start_task(self, task_id, consumed=0.0, left=1.0):
+        """启动任务 (wait -> doing)"""
+        url = f"{self.base_url}/task-start-{task_id}.json"
+        payload = {
+            "consumed": consumed,
+            "left": left,
+            "realStarted": ""
+        }
+        res = self._req('POST', url, data=payload, timeout=10)
+        return "success" in res.text or res.status_code == 200
+
+    def finish_task(self, task_id, current_consumed=1.0, assigned_to=None, comment=""):
+        """完成任务并报工"""
+        task = self.get_task_detail(task_id)
+        if not task:
+            return False, f"未找到任务 #{task_id}"
+
+        already_consumed = float(task.get('consumed', 0.0) or 0.0)
+        total_consumed = already_consumed + float(current_consumed)
+
+        finish_url = f"{self.base_url}/task-finish-{task_id}.json"
+        payload = {
+            "consumed": total_consumed,
+            "currentConsumed": float(current_consumed),
+            "assignedTo": assigned_to or task.get('openedBy', self.account),
+            "comment": comment
+        }
+        res = self._req('POST', finish_url, data=payload, timeout=10)
+        if "success" in res.text or res.status_code == 200:
+            return True, "完成成功"
+        else:
+            return False, res.text
+
+    def assign_task(self, task_id, assigned_to="closed", project_id=None, comment=""):
+        """指派任务 (支持修改为 closed 或指定用户)"""
+        task = self.get_task_detail(task_id)
+        if not task:
+            return False, f"未找到任务 #{task_id}"
+        if not project_id:
+            project_id = task.get('project', 0)
+
+        # 确保 status 符合禅道正则 /wait|doing|done|pause|cancel|closed/，绝不可为空字符串
+        current_status = str(task.get('status') or 'wait').strip()
+        if current_status not in ['wait', 'doing', 'done', 'pause', 'cancel', 'closed']:
+            current_status = 'wait'
+        target_status = "closed" if assigned_to == "closed" else current_status
+        current_left = str(task.get('left', '0') or '0')
+
+        url = f"{self.base_url}/task-assignTo-{project_id}-{task_id}.json"
+        payload = {
+            "assignedTo": assigned_to,
+            "status": target_status,
+            "left": current_left,
+            "comment": comment
+        }
+        res = self._req('POST', url, data=payload, timeout=10)
+        data = self._parse_data(res)
+        locate_url = str(data.get('locate', '')) if isinstance(data, dict) else ''
+
+        # 检查是否被禅道权限拦截重定向
+        if "user-deny" in res.text or "user-deny" in locate_url:
+            return False, f"禅道权限不足：当前账号【{self.account}】无权指派该任务"
+
+        if isinstance(data, dict):
+            if data.get('result') == 'fail':
+                msg = data.get('message') or '指派失败'
+                if isinstance(msg, dict):
+                    msg = "; ".join(f"{k}: {v}" for k, v in msg.items())
+                # 若 assignTo 接口因权限或状态拒绝，自动使用 edit_task_fields 兜底修改指派人
+                ok_edit, _ = self.edit_task_fields(task_id, {"assignedTo": assigned_to})
+                if ok_edit:
+                    return True, "指派修改成功"
+                return False, str(msg)
+            if 'locate' in data and "user-deny" not in locate_url:
+                return True, "指派修改成功"
+
+        if "user-deny" in res.text:
+            return False, f"禅道权限不足：当前账号【{self.account}】无权指派该任务"
+
+        if "locate" in res.text and "user-deny" not in res.text:
+            return True, "指派修改成功"
+
+        # 兜底通过 edit_task_fields 保证修改成功
+        ok_edit, _ = self.edit_task_fields(task_id, {"assignedTo": assigned_to})
+        if ok_edit:
+            return True, "指派修改成功"
+
+        return res.status_code == 200, "提交完成"
+
+    def edit_task_fields(self, task_id, update_fields, comment=""):
+        """编辑任务的通用字段 (完整传递已有字段，严防工时校验缺失)"""
+        task = self.get_task_detail(task_id)
+        if not task:
+            return False, f"未找到任务 #{task_id}"
+
+        edit_url = f"{self.base_url}/task-edit-{task_id}.json"
+        payload = {
+            "name": task.get('name', ''),
+            "desc": task.get('desc', ''),
+            "type": task.get('type', 'devel'),
+            "module": str(task.get('module', '0') or '0'),
+            "pri": task.get('pri', '3'),
+            "estimate": str(task.get('estimate', '0') or '0'),
+            "status": task.get('status', 'wait'),
+            "assignedTo": task.get('assignedTo', ''),
+            "consumed": str(task.get('consumed', '0') or '0'),
+            "left": str(task.get('left', '0') or '0'),
+            "deadline": task.get('deadline', ''),
+            "estStarted": task.get('estStarted', ''),
+            "realStarted": task.get('realStarted', ''),
+            "finishedDate": task.get('finishedDate', ''),
+            "closedDate": task.get('closedDate', ''),
+            "closedReason": task.get('closedReason', ''),
+            "lastEditedDate": task.get('lastEditedDate', ''),
+            "project": str(task.get('project', '0')),
+            "execution": str(task.get('execution', '0') or '0'),
+            "comment": str(comment or '').strip()
+        }
+
+        # 如果修改项目，模块重置为 0，所属执行重置为 0 避免跨项目引发校验不匹配
+        if "project" in update_fields:
+            payload["module"] = "0"
+            payload["execution"] = "0"
+
+        # 覆盖待修改的字段
+        for k, v in update_fields.items():
+            payload[k] = str(v)
+
+        res = self._req('POST', edit_url, data=payload, timeout=10)
+        data = self._parse_data(res)
+        locate_url = str(data.get('locate', '')) if isinstance(data, dict) else ''
+
+        # 1. 严格检查是否被禅道权限拦截 (user-deny)
+        if "user-deny" in res.text or "user-deny" in locate_url:
+            status_tip = ""
+            if task.get('status') == 'closed':
+                status_tip = "（且该任务当前为【已关闭(closed)】归档状态）"
+            return False, f"禅道权限不足：当前账号【{self.account}】未被系统授予【编辑任务】(task-edit)权限{status_tip}，请联系项目经理或管理员授权处理"
+
+        # 2. 准确判定业务执行结果
+        if isinstance(data, dict):
+            if data.get('result') == 'fail':
+                msg = data.get('message') or '修改被拒绝'
+                if isinstance(msg, dict):
+                    msg = "; ".join(f"{k}: {v}" for k, v in msg.items())
+                return False, str(msg)
+
+        # 3. 如果更新的是 project，做后置读取比对，验证禅道是否真正保存
+        if "project" in update_fields:
+            latest_task = self.get_task_detail(task_id)
+            if str(latest_task.get('project')) == str(update_fields['project']):
+                return True, "项目修改成功"
+            else:
+                return False, f"禅道未保存项目变更(当前仍为项目#{latest_task.get('project')})"
+
+        # 4. 如果更新的是 name，做后置读取比对
+        if "name" in update_fields:
+            latest_task = self.get_task_detail(task_id)
+            if str(latest_task.get('name')) == str(update_fields['name']):
+                return True, "任务名称修改成功"
+            else:
+                return False, "禅道未保存任务名称"
+
+        if locate_url and "user-deny" not in locate_url:
+            return True, "更新成功"
+        elif "fail" in res.text:
+            return False, res.text
+        return res.status_code == 200, "更新完成"
+
+    def batch_auto_finish_my_tasks_stream(self, target_task_ids=None, interval_seconds=1.0, comment=""):
+        """
+        一键批量完成“我的未完成任务” (流式实时输出处理进度)
+        """
+        try:
+            interval_val = float(interval_seconds) if interval_seconds is not None else 1.0
+            if interval_val < 0:
+                interval_val = 0.0
+        except (ValueError, TypeError):
+            interval_val = 1.0
+
+        custom_comment = str(comment or '').strip()
+        final_comment = custom_comment
+
+        if target_task_ids:
+            tasks_to_process = []
+            for tid in target_task_ids:
+                t = self.get_task_detail(tid)
+                if t:
+                    tasks_to_process.append(t)
+        else:
+            my_tasks = self.get_my_tasks(view_type="assignedTo", fetch_all=True)
+            tasks_to_process = [t for t in my_tasks if t.get('status') in ['wait', 'doing', 'pause']]
+
+        total = len(tasks_to_process)
+        yield {
+            "type": "start",
+            "total": total,
+            "message": f"准备开始批量处理 {total} 个任务..."
+        }
+
+        results = {
+            "total": total,
+            "success": [],
+            "skipped": [],
+            "failed": []
+        }
+
+        for idx, t in enumerate(tasks_to_process):
+            t_id = str(t.get('id'))
+            t_name = t.get('name', '')
+            status = t.get('status', '')
+            cur_num = idx + 1
+
+            try:
+                est_raw = t.get('estimate')
+                try:
+                    estimate_val = float(est_raw) if est_raw not in [None, ''] else 0.0
+                except ValueError:
+                    estimate_val = 0.0
+
+                if estimate_val <= 0:
+                    results["skipped"].append({
+                        "id": t_id,
+                        "name": t_name,
+                        "reason": "缺少预计消耗时间(未填写或为0)"
+                    })
+                    yield {
+                        "type": "progress",
+                        "current": cur_num,
+                        "total": total,
+                        "task": {"id": t_id, "name": t_name},
+                        "status": "skipped",
+                        "message": f"任务#{t_id} 缺少预计工时已跳过"
+                    }
+                    continue
+
+                if status == 'wait':
+                    self.start_task(t_id, consumed=0, left=estimate_val)
+                    if interval_val > 0:
+                        time.sleep(interval_val)
+
+                ok, msg = self.finish_task(
+                    task_id=t_id,
+                    current_consumed=estimate_val,
+                    assigned_to=t.get('openedBy', self.account),
+                    comment=final_comment
+                )
+
+                if ok:
+                    results["success"].append({
+                        "id": t_id,
+                        "name": t_name,
+                        "consumed": estimate_val
+                    })
+                    yield {
+                        "type": "progress",
+                        "current": cur_num,
+                        "total": total,
+                        "task": {"id": t_id, "name": t_name},
+                        "status": "success",
+                        "message": f"任务#{t_id} 流转并报工完成"
+                    }
+                else:
+                    results["failed"].append({
+                        "id": t_id,
+                        "name": t_name,
+                        "reason": msg
+                    })
+                    yield {
+                        "type": "progress",
+                        "current": cur_num,
+                        "total": total,
+                        "task": {"id": t_id, "name": t_name},
+                        "status": "failed",
+                        "message": f"任务#{t_id} 完成失败: {msg}"
+                    }
+
+                if interval_val > 0 and idx < total - 1:
+                    time.sleep(interval_val)
+
+            except Exception as e:
+                results["failed"].append({
+                    "id": t_id,
+                    "name": t_name,
+                    "reason": f"执行异常: {str(e)}"
+                })
+                yield {
+                    "type": "progress",
+                    "current": cur_num,
+                    "total": total,
+                    "task": {"id": t_id, "name": t_name},
+                    "status": "failed",
+                    "message": f"任务#{t_id} 执行异常: {str(e)}"
+                }
+
+        yield {
+            "type": "done",
+            "success": True,
+            "data": results,
+            "message": f"处理完成！成功 {len(results['success'])} 个，跳过 {len(results['skipped'])} 个，失败 {len(results['failed'])} 个"
+        }
+
+    def batch_auto_finish_my_tasks(self, target_task_ids=None, interval_seconds=1.0, comment=""):
+        """一键批量完成“我的未完成任务” (兼容同步调用)"""
+        last_res = None
+        for ev in self.batch_auto_finish_my_tasks_stream(target_task_ids, interval_seconds, comment):
+            if ev.get("type") == "done":
+                last_res = ev.get("data")
+        return last_res or {"total": 0, "success": [], "skipped": [], "failed": []}
+
+    def batch_update_field_stream(self, task_ids, field, value, comment="", name_mode="direct", replace_from="", sync_desc=False):
+        """
+        根据配置化的字段名称批量修改 (流式实时输出处理进度)
+        """
+        actual_comment = str(comment or '').strip()
+        total = len(task_ids)
+        yield {
+            "type": "start",
+            "total": total,
+            "message": f"准备修改 {total} 条任务..."
+        }
+
+        results = {
+            "total": total,
+            "modified_count": 0,
+            "unmodified_count": 0,
+            "modified": [],
+            "unmodified": [],
+            "unmodified_names": [],
+            "success": [],
+            "failed": []
+        }
+
+        for idx, tid in enumerate(task_ids):
+            cur_num = idx + 1
+            try:
+                t = self.get_task_detail(tid)
+                if not t:
+                    err_item = {"id": tid, "name": f"任务#{tid}", "reason": "未找到任务"}
+                    results["unmodified"].append(err_item)
+                    results["failed"].append(err_item)
+                    yield {
+                        "type": "progress",
+                        "current": cur_num,
+                        "total": total,
+                        "task": {"id": tid, "name": f"任务#{tid}"},
+                        "status": "failed",
+                        "message": f"任务#{tid} 不存在"
+                    }
+                    continue
+
+                t_name = t.get('name', '')
+                project_id = t.get('project', 0)
+                ok = False
+                msg = ""
+                final_name = t_name
+
+                # 特殊字段及无变更跳过处理
+                if field == "name":
+                    target_name = t_name
+                    if name_mode == "prefix":
+                        target_name = f"{value}{t_name}" if value else t_name
+                    elif name_mode == "suffix":
+                        target_name = f"{t_name}{value}" if value else t_name
+                    elif name_mode == "replace":
+                        target_name = t_name.replace(str(replace_from), str(value))
+                    else:
+                        target_name = str(value).strip()
+
+                    if not target_name:
+                        err_item = {"id": tid, "name": t_name, "reason": "新任务名称不能为空"}
+                        results["unmodified"].append(err_item)
+                        results["failed"].append(err_item)
+                        yield {
+                            "type": "progress",
+                            "current": cur_num,
+                            "total": total,
+                            "task": {"id": tid, "name": t_name},
+                            "status": "failed",
+                            "message": f"任务#{tid} 新名称不能为空"
+                        }
+                        continue
+
+                    old_desc = str(t.get('desc', '') or '').strip()
+                    name_changed = (target_name != t_name)
+                    desc_changed = sync_desc and (old_desc != target_name)
+
+                    if not name_changed and not desc_changed:
+                        if name_mode == "replace" and str(replace_from) not in t_name:
+                            reason = f"未包含待替换字符「{replace_from}」，未做修改"
+                        else:
+                            reason = "新旧名称一致，未做修改"
+                        results["unmodified"].append({"id": tid, "name": t_name, "reason": reason})
+                        yield {
+                            "type": "progress",
+                            "current": cur_num,
+                            "total": total,
+                            "task": {"id": tid, "name": t_name},
+                            "status": "skipped",
+                            "message": f"任务#{tid} {reason}"
+                        }
+                        continue
+
+                    update_dict = {"name": target_name}
+                    if sync_desc:
+                        update_dict["desc"] = target_name
+
+                    ok, msg = self.edit_task_fields(tid, update_dict, comment=actual_comment)
+                    final_name = target_name
+                elif field == "assignedTo":
+                    target_assigned = str(value or '').strip()
+                    old_assigned = str(t.get('assignedTo') or '').strip()
+                    if old_assigned == target_assigned:
+                        results["unmodified"].append({"id": tid, "name": t_name, "reason": "指派人已是目标用户，未做修改"})
+                        yield {
+                            "type": "progress",
+                            "current": cur_num,
+                            "total": total,
+                            "task": {"id": tid, "name": t_name},
+                            "status": "skipped",
+                            "message": f"任务#{tid} 指派人已是目标用户"
+                        }
+                        continue
+                    ok, msg = self.assign_task(tid, assigned_to=target_assigned, project_id=project_id, comment=actual_comment)
+                elif field == "status" and value == "doing":
+                    old_status = str(t.get('status') or '').strip()
+                    if old_status == "doing":
+                        results["unmodified"].append({"id": tid, "name": t_name, "reason": "状态已为进行中，未做修改"})
+                        yield {
+                            "type": "progress",
+                            "current": cur_num,
+                            "total": total,
+                            "task": {"id": tid, "name": t_name},
+                            "status": "skipped",
+                            "message": f"任务#{tid} 状态已为进行中"
+                        }
+                        continue
+                    ok = self.start_task(tid)
+                    msg = "启动成功" if ok else "启动失败"
+                elif field == "status" and value == "done":
+                    old_status = str(t.get('status') or '').strip()
+                    if old_status == "done":
+                        results["unmodified"].append({"id": tid, "name": t_name, "reason": "状态已为已完成，未做修改"})
+                        yield {
+                            "type": "progress",
+                            "current": cur_num,
+                            "total": total,
+                            "task": {"id": tid, "name": t_name},
+                            "status": "skipped",
+                            "message": f"任务#{tid} 状态已为已完成"
+                        }
+                        continue
+                    est = float(t.get('estimate') or 1.0)
+                    ok, msg = self.finish_task(tid, current_consumed=est, comment=actual_comment)
+                elif field == "status" and value == "closed":
+                    old_status = str(t.get('status') or '').strip()
+                    if old_status == "closed":
+                        results["unmodified"].append({"id": tid, "name": t_name, "reason": "状态已为已关闭，未做修改"})
+                        yield {
+                            "type": "progress",
+                            "current": cur_num,
+                            "total": total,
+                            "task": {"id": tid, "name": t_name},
+                            "status": "skipped",
+                            "message": f"任务#{tid} 状态已为已关闭"
+                        }
+                        continue
+                    ok, msg = self.assign_task(tid, assigned_to="closed", project_id=project_id, comment=actual_comment)
+                elif field == "project":
+                    old_proj = str(t.get('project') or '').strip()
+                    target_proj = str(value or '').strip()
+                    if old_proj == target_proj:
+                        results["unmodified"].append({"id": tid, "name": t_name, "reason": "所属项目未变动，未做修改"})
+                        yield {
+                            "type": "progress",
+                            "current": cur_num,
+                            "total": total,
+                            "task": {"id": tid, "name": t_name},
+                            "status": "skipped",
+                            "message": f"任务#{tid} 所属项目未变动"
+                        }
+                        continue
+                    ok, msg = self.edit_task_fields(tid, {field: value}, comment=actual_comment)
+                elif field == "execution":
+                    old_exec = str(t.get('execution') or '').strip()
+                    target_exec = str(value or '').strip()
+                    if old_exec == target_exec:
+                        results["unmodified"].append({"id": tid, "name": t_name, "reason": "所属迭代未变动，未做修改"})
+                        yield {
+                            "type": "progress",
+                            "current": cur_num,
+                            "total": total,
+                            "task": {"id": tid, "name": t_name},
+                            "status": "skipped",
+                            "message": f"任务#{tid} 所属迭代未变动"
+                        }
+                        continue
+                    ok, msg = self.edit_task_fields(tid, {field: value}, comment=actual_comment)
+                elif field == "pri":
+                    old_pri = str(t.get('pri') or '').strip()
+                    target_pri = str(value or '').strip()
+                    if old_pri == target_pri:
+                        results["unmodified"].append({"id": tid, "name": t_name, "reason": "优先级未变动，未做修改"})
+                        yield {
+                            "type": "progress",
+                            "current": cur_num,
+                            "total": total,
+                            "task": {"id": tid, "name": t_name},
+                            "status": "skipped",
+                            "message": f"任务#{tid} 优先级未变动"
+                        }
+                        continue
+                    ok, msg = self.edit_task_fields(tid, {field: value}, comment=actual_comment)
+                elif field == "estimate":
+                    old_est = str(t.get('estimate') or '').strip()
+                    target_est = str(value or '').strip()
+                    try:
+                        is_same = (float(old_est) == float(target_est))
+                    except Exception:
+                        is_same = (old_est == target_est)
+                    if is_same:
+                        results["unmodified"].append({"id": tid, "name": t_name, "reason": "预计工时未变动，未做修改"})
+                        yield {
+                            "type": "progress",
+                            "current": cur_num,
+                            "total": total,
+                            "task": {"id": tid, "name": t_name},
+                            "status": "skipped",
+                            "message": f"任务#{tid} 预计工时未变动"
+                        }
+                        continue
+                    ok, msg = self.edit_task_fields(tid, {field: value}, comment=actual_comment)
+                elif field == "deadline":
+                    old_ddl = str(t.get('deadline') or '').strip()
+                    target_ddl = str(value or '').strip()
+                    if old_ddl == target_ddl:
+                        results["unmodified"].append({"id": tid, "name": t_name, "reason": "截止日期未变动，未做修改"})
+                        yield {
+                            "type": "progress",
+                            "current": cur_num,
+                            "total": total,
+                            "task": {"id": tid, "name": t_name},
+                            "status": "skipped",
+                            "message": f"任务#{tid} 截止日期未变动"
+                        }
+                        continue
+                    ok, msg = self.edit_task_fields(tid, {field: value}, comment=actual_comment)
+                else:
+                    old_val = str(t.get(field) or '').strip()
+                    target_val = str(value or '').strip()
+                    if old_val == target_val:
+                        results["unmodified"].append({"id": tid, "name": t_name, "reason": "字段值未变动，未做修改"})
+                        yield {
+                            "type": "progress",
+                            "current": cur_num,
+                            "total": total,
+                            "task": {"id": tid, "name": t_name},
+                            "status": "skipped",
+                            "message": f"任务#{tid} 字段值未变动"
+                        }
+                        continue
+                    ok, msg = self.edit_task_fields(tid, {field: value})
+
+                if ok:
+                    results["modified"].append({"id": tid, "name": final_name})
+                    results["success"].append({"id": tid, "name": final_name})
+                    yield {
+                        "type": "progress",
+                        "current": cur_num,
+                        "total": total,
+                        "task": {"id": tid, "name": final_name},
+                        "status": "success",
+                        "message": f"任务#{tid} 修改成功"
+                    }
+                else:
+                    results["unmodified"].append({"id": tid, "name": t_name, "reason": f"修改失败: {msg}"})
+                    results["failed"].append({"id": tid, "name": t_name, "reason": msg})
+                    yield {
+                        "type": "progress",
+                        "current": cur_num,
+                        "total": total,
+                        "task": {"id": tid, "name": t_name},
+                        "status": "failed",
+                        "message": f"任务#{tid} 未修改: {msg}"
+                    }
+            except Exception as e:
+                results["unmodified"].append({"id": tid, "name": f"任务#{tid}", "reason": f"执行异常: {str(e)}"})
+                results["failed"].append({"id": tid, "name": f"任务#{tid}", "reason": str(e)})
+                yield {
+                    "type": "progress",
+                    "current": cur_num,
+                    "total": total,
+                    "task": {"id": tid, "name": f"任务#{tid}"},
+                    "status": "failed",
+                    "message": f"任务#{tid} 异常: {str(e)}"
+                }
+
+        results["modified_count"] = len(results["modified"])
+        results["unmodified_count"] = len(results["unmodified"])
+        results["unmodified_names"] = [item["name"] for item in results["unmodified"]]
+
+        yield {
+            "type": "done",
+            "success": True,
+            "data": results,
+            "modified_count": results["modified_count"],
+            "unmodified_count": results["unmodified_count"],
+            "unmodified_names": results["unmodified_names"],
+            "message": f"修改完成！实际修改 {results['modified_count']} 条，未修改 {results['unmodified_count']} 条"
+        }
+
+    def batch_update_field(self, task_ids, field, value, comment="", name_mode="direct", replace_from="", sync_desc=False):
+        """根据配置化的字段名称批量修改 (兼容同步调用)"""
+        last_res = None
+        for ev in self.batch_update_field_stream(task_ids, field, value, comment, name_mode, replace_from, sync_desc):
+            if ev.get("type") == "done":
+                last_res = ev.get("data")
+        return last_res or {
+            "total": len(task_ids),
+            "modified_count": 0,
+            "unmodified_count": 0,
+            "modified": [],
+            "unmodified": [],
+            "unmodified_names": [],
+            "success": [],
+            "failed": []
+        }
+
+    def batch_rename_tasks_stream(self, task_list, sync_desc=False, comment="批量重命名任务"):
+        """
+        批量个性化修改任务名称 (流式实时输出处理进度)
+        """
+        total = len(task_list)
+        yield {
+            "type": "start",
+            "total": total,
+            "message": f"准备批量重命名 {total} 条任务..."
+        }
+
+        results = {
+            "total": total,
+            "modified_count": 0,
+            "unmodified_count": 0,
+            "modified": [],
+            "unmodified": [],
+            "unmodified_names": [],
+            "success": [],
+            "failed": []
+        }
+        for idx, item in enumerate(task_list):
+            cur_num = idx + 1
+            tid = item.get('id')
+            new_name = str(item.get('name', '')).strip()
+            if not tid or not new_name:
+                err_item = {"id": tid, "name": f"任务#{tid}", "reason": "任务ID或新名称为空"}
+                results["unmodified"].append(err_item)
+                results["failed"].append(err_item)
+                yield {
+                    "type": "progress",
+                    "current": cur_num,
+                    "total": total,
+                    "task": {"id": tid, "name": f"任务#{tid}"},
+                    "status": "failed",
+                    "message": f"任务#{tid} ID或新名称为空"
+                }
+                continue
+            try:
+                t = self.get_task_detail(tid)
+                if not t:
+                    err_item = {"id": tid, "name": f"任务#{tid}", "reason": "未找到任务"}
+                    results["unmodified"].append(err_item)
+                    results["failed"].append(err_item)
+                    yield {
+                        "type": "progress",
+                        "current": cur_num,
+                        "total": total,
+                        "task": {"id": tid, "name": f"任务#{tid}"},
+                        "status": "failed",
+                        "message": f"任务#{tid} 不存在"
+                    }
+                    continue
+
+                old_name = str(t.get('name', '')).strip()
+                old_desc = str(t.get('desc', '') or '').strip()
+
+                name_changed = (old_name != new_name)
+                desc_changed = sync_desc and (old_desc != new_name)
+
+                if not name_changed and not desc_changed:
+                    results["unmodified"].append({
+                        "id": tid,
+                        "name": old_name,
+                        "reason": "新旧名称一致，未做修改"
+                    })
+                    yield {
+                        "type": "progress",
+                        "current": cur_num,
+                        "total": total,
+                        "task": {"id": tid, "name": old_name},
+                        "status": "skipped",
+                        "message": f"任务#{tid} 新旧名称一致"
+                    }
+                    continue
+
+                update_dict = {"name": new_name}
+                if sync_desc:
+                    update_dict["desc"] = new_name
+                ok, msg = self.edit_task_fields(tid, update_dict)
+                if ok:
+                    results["modified"].append({"id": tid, "name": new_name})
+                    results["success"].append({"id": tid, "name": new_name})
+                    yield {
+                        "type": "progress",
+                        "current": cur_num,
+                        "total": total,
+                        "task": {"id": tid, "name": new_name},
+                        "status": "success",
+                        "message": f"任务#{tid} 重命名成功"
+                    }
+                else:
+                    results["unmodified"].append({"id": tid, "name": old_name, "reason": f"修改失败: {msg}"})
+                    results["failed"].append({"id": tid, "name": old_name, "reason": msg})
+                    yield {
+                        "type": "progress",
+                        "current": cur_num,
+                        "total": total,
+                        "task": {"id": tid, "name": old_name},
+                        "status": "failed",
+                        "message": f"任务#{tid} 重命名失败: {msg}"
+                    }
+            except Exception as e:
+                results["unmodified"].append({"id": tid, "name": f"任务#{tid}", "reason": f"执行异常: {str(e)}"})
+                results["failed"].append({"id": tid, "name": f"任务#{tid}", "reason": str(e)})
+                yield {
+                    "type": "progress",
+                    "current": cur_num,
+                    "total": total,
+                    "task": {"id": tid, "name": f"任务#{tid}"},
+                    "status": "failed",
+                    "message": f"任务#{tid} 异常: {str(e)}"
+                }
+
+        results["modified_count"] = len(results["modified"])
+        results["unmodified_count"] = len(results["unmodified"])
+        results["unmodified_names"] = [item["name"] for item in results["unmodified"]]
+
+        yield {
+            "type": "done",
+            "success": True,
+            "data": results,
+            "modified_count": results["modified_count"],
+            "unmodified_count": results["unmodified_count"],
+            "unmodified_names": results["unmodified_names"],
+            "message": f"修改完成！实际修改 {results['modified_count']} 条，未修改 {results['unmodified_count']} 条"
+        }
+
+    def batch_rename_tasks(self, task_list, sync_desc=False, comment="批量重命名任务"):
+        """批量个性化修改任务名称 (兼容同步调用)"""
+        last_res = None
+        for ev in self.batch_rename_tasks_stream(task_list, sync_desc, comment):
+            if ev.get("type") == "done":
+                last_res = ev.get("data")
+        return last_res or {
+            "total": len(task_list),
+            "modified_count": 0,
+            "unmodified_count": 0,
+            "modified": [],
+            "unmodified": [],
+            "unmodified_names": [],
+            "success": [],
+            "failed": []
+        }
+

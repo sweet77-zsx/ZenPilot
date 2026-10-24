@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZenPilot · 禅道任务效能驾驶舱</title>
+    <link rel="icon" type="image/png" href="static/images/logo.png">
+    <script>
+        (function() {
+            var p = window.location.pathname;
+            if (p.indexOf('/chandao') === 0) {
+                document.write('<base href="/chandao/">');
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="static/css/style.css?v=20">
+</head>
+<body>
+    <div class="app-container">
+        <!-- 顶部导航栏 -->
+        <header class="app-header">
+            <div class="brand">
+                <div class="brand-logo">
+                    <img src="static/images/logo.png" alt="ZenPilot Logo" class="brand-logo-img">
+                </div>
+                <div class="brand-info">
+                    <h1>ZenPilot <span class="brand-badge">禅效通</span></h1>
+                    <span class="sub-title">ZenTao Efficiency & Automation Studio</span>
+                </div>
+            </div>
+            <div class="header-status">
+                <div class="status-indicator">
+                    <span class="dot online" id="statusDot"></span>
+                    <span id="statusText">连接检测中...</span>
+                </div>
+                <div class="user-chip" id="userChip" style="display: none; cursor: pointer;" title="点击管理账号/切换登录人">
+                    <span class="user-avatar" id="userAvatar">王</span>
+                    <div class="user-meta">
+                        <strong id="userRealname">王淋淼</strong>
+                        <span id="userAccount">wanglinmiao</span>
+                    </div>
+                </div>
+                <button class="btn btn-primary btn-sm" id="btnHeaderLogin" style="display: none;" title="点击登录禅道账号">🔑 登录禅道</button>
+                <button class="btn btn-secondary btn-sm" id="btnRefreshStatus" title="刷新连接状态">🔄 刷新</button>
+            </div>
+        </header>
+
+        <!-- 主选项卡切换 -->
+        <nav class="nav-tabs">
+            <button class="tab-item active" data-tab="tab-finish">
+                <span class="tab-icon">⚡</span>
+                <span class="tab-title">批量完成任务</span>
+                <span class="badge" id="myActiveBadge">0</span>
+            </button>
+            <button class="tab-item" data-tab="tab-manage">
+                <span class="tab-icon">🛠️</span>
+                <span class="tab-title">自定义查询 & 配置化批量修改</span>
+            </button>
+            <button class="tab-item" data-tab="tab-weekly-report">
+                <span class="tab-icon">📊</span>
+                <span class="tab-title">本周工作周报</span>
+            </button>
+        </nav>
+
+        <!-- 主内容区 -->
+        <main class="app-main">
+            <!-- TAB 1: 一键批量完成 -->
+            <section class="tab-content active" id="tab-finish">
+                <div class="action-card">
+                    <div class="card-header">
+                        <div class="card-title-group">
+                            <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                                <h2 style="margin: 0;">我的待办未完成任务</h2>
+                                <span class="badge-total-hours" id="myActiveTotalHours" title="当前列表中所有待办任务的预计工时总和">
+                                    ⏳ 总预计消耗工时: <strong>0</strong> h
+                                </span>
+                            </div>
+                            <p class="card-desc" style="margin-top: 4px;">自动查询指派给当前登录用户的全部未开始、进行中任务</p>
+                        </div>
+                        <div class="header-actions">
+                            <button class="btn btn-secondary" id="btnRefreshMyTasks">
+                                🔄 刷新列表
+                            </button>
+                            <button class="btn btn-primary" id="btnExecuteBatchFinish">
+                                ⚡ 一键批量完成 (自动进行中 -> 报工已完成)
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 一键批量完成参数配置栏 -->
+                    <div class="batch-finish-config-bar" style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 16px; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+                        <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap; flex: 1;">
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <label for="batchFinishInterval" style="font-weight: 600; color: #334155; font-size: 13px; margin: 0; white-space: nowrap;">
+                                    ⏱️ 步骤间隔时间:
+                                </label>
+                                <div style="display: flex; align-items: center; gap: 4px;">
+                                    <input type="number" id="batchFinishInterval" class="form-control" value="1.0" min="0" max="60" step="0.5" style="width: 75px; height: 32px; padding: 4px 8px; font-size: 13px; text-align: center;">
+                                    <span style="font-size: 13px; color: #64748b;">秒/步</span>
+                                </div>
+                                <span style="font-size: 12px; color: #94a3b8;" title="每切换状态或完成一个任务后暂停的时间，模拟真实人工操作间隔">(模拟人工操作)</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 260px;">
+                                <label for="batchFinishComment" style="font-weight: 600; color: #334155; font-size: 13px; margin: 0; white-space: nowrap;">
+                                    📝 可选完成备注:
+                                </label>
+                                <input type="text" id="batchFinishComment" class="form-control" placeholder="选填，如：开发已自测完成（留空未填默认无备注）" style="height: 32px; padding: 4px 10px; font-size: 13px; flex: 1;">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="alert alert-info">
+                        <span class="alert-icon">💡</span>
+                        <div class="alert-content">
+                            <strong>智能报工流转规则：</strong>
+                            未开始任务将自动切换为「进行中」；自动将<b>预计工时</b>填入消耗时间报工并完成；若任务<b>未填写预计工时</b>将自动跳过，并在所有执行完成后弹出汇总提示框。
+                        </div>
+                    </div>
+
+                    <!-- 任务列表表格 -->
+                    <div class="table-wrapper">
+                        <table class="data-table" id="myTasksTable">
+                            <thead>
+                                <tr>
+                                    <th style="width: 80px;">ID</th>
+                                    <th>任务名称</th>
+                                    <th style="width: 110px;">状态</th>
+                                    <th style="width: 140px;">预计耗时</th>
+                                    <th style="width: 120px;">已消耗工时</th>
+                                    <th style="width: 120px;">创建人</th>
+                                    <th style="width: 130px;">截止日期</th>
+                                </tr>
+                            </thead>
+                            <tbody id="myTasksTableBody">
+                                <tr>
+                                    <td colspan="7" class="empty-cell">加载中...</td>
+                                </tr>
+                            </tbody>
+                            <tfoot id="myTasksTableFoot" style="display: none;">
+                                <tr style="background: #f8fafc; font-weight: 600; border-top: 2px solid #e2e8f0;">
+                                    <td colspan="3" style="text-align: right; color: #475569; padding-right: 14px;">合计：</td>
+                                    <td style="color: #2563eb; font-weight: 700;" id="footTotalEstHours">0 h</td>
+                                    <td style="color: #475569;" id="footTotalConsumedHours">0 h</td>
+                                    <td colspan="2"></td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 2: 自定义查询与配置化批量修改 -->
+            <section class="tab-content" id="tab-manage">
+                <!-- 查询条件控制卡片 -->
+                <div class="filter-card">
+                    <div class="card-header">
+                        <h2>自定义多维查询</h2>
+                        <button class="btn btn-primary" id="btnSearch">🔍 立即查询</button>
+                    </div>
+                    <div class="filter-grid">
+                        <div class="form-group">
+                            <label>目标用户</label>
+                            <div class="searchable-select-wrapper" id="filterUserWrapper">
+                                <input type="text" id="filterUserInput" class="form-control searchable-select-input" placeholder="选择目标用户 (默认我)" autocomplete="off">
+                                <input type="hidden" id="filterUserAccount" value="">
+                                <button type="button" class="searchable-select-clear" id="filterUserClear" title="切回当前登录用户(我)" style="display: none;">&times;</button>
+                                <span class="searchable-select-arrow">▼</span>
+                                <div class="searchable-select-dropdown" id="filterUserDropdown" style="display: none;">
+                                    <!-- 动态注入用户列表 -->
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>任务范围类型</label>
+                            <select id="filterViewType" class="form-control">
+                                <option value="finishedBy" selected>由我完成 (finishedBy)</option>
+                                <option value="assignedTo">指派给我 (assignedTo)</option>
+                                <option value="openedBy">由我创建 (openedBy)</option>
+                                <option value="closedBy">由我关闭 (closedBy)</option>
+                                <option value="all">我的全部任务 (all)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>预计开始年份</label>
+                            <input type="text" id="filterYear" class="form-control" placeholder="如 2026 (留空不限)" value="2026">
+                        </div>
+                        <div class="form-group">
+                            <label>任务状态过滤</label>
+                            <select id="filterStatus" class="form-control">
+                                <option value="">全部状态</option>
+                                <option value="wait">未开始 (wait)</option>
+                                <option value="doing">进行中 (doing)</option>
+                                <option value="done" selected>已完成 (done)</option>
+                                <option value="closed">已关闭 (closed)</option>
+                                <option value="pause">已暂停 (pause)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>所属项目 (可选，支持关键字搜索)</label>
+                            <div class="searchable-select-wrapper" id="filterProjectWrapper">
+                                <input type="text" id="filterProjectInput" class="form-control searchable-select-input" placeholder="输入名称/ID搜索项目 (全部)" autocomplete="off">
+                                <input type="hidden" id="filterProjectId" value="">
+                                <button type="button" class="searchable-select-clear" id="filterProjectClear" title="清除项目选择" style="display: none;">&times;</button>
+                                <span class="searchable-select-arrow">▼</span>
+                                <div class="searchable-select-dropdown" id="filterProjectDropdown" style="display: none;">
+                                    <!-- 动态注入项目列表 -->
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>关键字搜索 (名称/ID)</label>
+                            <input type="text" id="filterKeyword" class="form-control" placeholder="输入搜索词模糊匹配">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 配置化批量修改控制面板 -->
+                <div class="batch-edit-card">
+                    <div class="batch-edit-header">
+                        <div class="selection-summary">
+                            <span>已勾选 <strong id="selectedCount" class="highlight-text">0</strong> 个任务</span>
+                            <div class="quick-select-btns">
+                                <button class="btn btn-text btn-xs" id="btnSelectAll">全选所有结果</button>
+                                <button class="btn btn-text btn-xs" id="btnDeselectAll">取消全选</button>
+                            </div>
+                        </div>
+                        <div class="config-editor">
+                            <div class="form-inline-group">
+                                <label>选择要修改的字段：</label>
+                                <select id="batchFieldSelect" class="form-control inline-select">
+                                    <option value="name">任务名称 (name)</option>
+                                    <option value="project" selected>所属项目 (project)</option>
+                                    <option value="assignedTo">指派给 (assignedTo)</option>
+                                    <option value="status">任务状态 (status)</option>
+                                    <option value="execution">所属执行/迭代 (execution)</option>
+                                    <option value="estimate">预计工时 (estimate)</option>
+                                    <option value="pri">优先级 (pri)</option>
+                                    <option value="deadline">截止日期 (deadline)</option>
+                                </select>
+                            </div>
+
+                            <div class="form-inline-group dynamic-value-container" id="dynamicValueContainer">
+                                <!-- 动态注入输入框控件 -->
+                            </div>
+
+                            <div class="form-inline-group">
+                                <input type="text" id="batchUpdateComment" class="form-control" placeholder="选填修改备注 (留空无备注)" style="width: 185px;">
+                            </div>
+
+                            <button class="btn btn-warning" id="btnExecuteBatchUpdate">
+                                🚀 一键批量修改
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 行内修改待提交提醒条 -->
+                    <div class="inline-edit-bar" id="inlineEditBar" style="display: none;">
+                        <div class="inline-edit-info">
+                            <span class="inline-edit-badge">✏️ 已暂存</span>
+                            <span>已自定义修改 <strong id="modifiedNamesCount" class="highlight-text">0</strong> 个任务的名称</span>
+                            <span class="inline-edit-tip">（可继续直接点击其他任务名称修改，确认无误后统一提交）</span>
+                        </div>
+                        <div class="inline-edit-actions" style="display: flex; align-items: center; gap: 10px;">
+                            <label class="checkbox-label" style="font-size: 12px; color: #1e40af; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; user-select: none;">
+                                <input type="checkbox" id="inlineSyncDescCheckbox" checked>
+                                <span>同步将任务描述改成与名称一致</span>
+                            </label>
+                            <button class="btn btn-secondary btn-sm" id="btnCancelInlineEdit">撤销修改</button>
+                            <button class="btn btn-success btn-sm" id="btnSubmitInlineEdit">💾 统一提交保存</button>
+                        </div>
+                    </div>
+
+                    <!-- 查询结果表格 -->
+                    <div class="table-wrapper">
+                        <table class="data-table" id="queryResultTable">
+                            <thead>
+                                <tr>
+                                    <th style="width: 40px; text-align: center;">
+                                        <input type="checkbox" id="checkAllRows">
+                                    </th>
+                                    <th style="width: 80px;">ID</th>
+                                    <th>任务名称</th>
+                                    <th style="width: 100px;">状态</th>
+                                    <th style="width: 110px;">指派给</th>
+                                    <th style="width: 110px;">实际完成者</th>
+                                    <th style="width: 100px;">项目ID</th>
+                                    <th style="width: 110px;">预计开始</th>
+                                    <th style="width: 110px;">截止日期</th>
+                                    <th style="width: 90px;">预计工时</th>
+                                </tr>
+                            </thead>
+                            <tbody id="queryTableBody">
+                                <tr>
+                                    <td colspan="10" class="empty-cell">未找到符合条件的任务</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 3: 本周工作周报 (智能生成、拟真预览与 Excel 导出) -->
+            <section class="tab-content" id="tab-weekly-report">
+                <div class="weekly-report-card">
+                    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                        <div class="card-title-group">
+                            <h2>📊 个人工作周报</h2>
+                            <p class="card-desc">自动提取您本周在禅道完成的全部任务，按项目归类生成符合《应用组周报》格式的标准周报</p>
+                        </div>
+                        <div class="header-actions" style="display: flex; align-items: center; gap: 10px;">
+                            <button class="btn btn-primary" id="btnGenerateWeeklyReport">
+                                ⚡ 自动生成本周周报
+                            </button>
+                            <button class="btn btn-success" id="btnExportWeeklyReport" style="display: none;">
+                                📥 导出周报 (.xlsx)
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 周报生成参数配置栏 -->
+                    <div class="report-filter-bar">
+                        <div class="report-filter-item">
+                            <label>周报所属周：</label>
+                            <div class="date-range-picker">
+                                <button type="button" class="btn btn-secondary btn-sm" id="btnPrevWeek" title="上一周">◀ 上周</button>
+                                <input type="date" id="reportStartDate" class="form-control" style="width: 135px; height: 32px; font-size: 13px;">
+                                <span style="color: #64748b;">至</span>
+                                <input type="date" id="reportEndDate" class="form-control" style="width: 135px; height: 32px; font-size: 13px;">
+                                <button type="button" class="btn btn-secondary btn-sm" id="btnThisWeek" title="本周">本周</button>
+                            </div>
+                        </div>
+                        <div class="report-filter-item">
+                            <label>汇报人：</label>
+                            <input type="text" id="reportReporterInput" class="form-control" placeholder="姓名" style="width: 110px; height: 32px; font-size: 13px;">
+                        </div>
+                        <div class="report-filter-item">
+                            <label>所属部门：</label>
+                            <input type="text" id="reportDeptInput" class="form-control" value="应用组" placeholder="部门" style="width: 110px; height: 32px; font-size: 13px;">
+                        </div>
+                        <div class="report-filter-item">
+                            <label>大标题：</label>
+                            <input type="text" id="reportTitleInput" class="form-control" value="应用组工作周报" style="width: 150px; height: 32px; font-size: 13px;">
+                        </div>
+                    </div>
+
+                    <!-- 初始空状态引导 -->
+                    <div class="report-empty-placeholder" id="reportEmptyPlaceholder">
+                        <div style="font-size: 42px; margin-bottom: 12px;">📑</div>
+                        <h3 style="margin-bottom: 8px; color: #334155; font-size: 16px;">尚未生成周报数据</h3>
+                        <p style="color: #64748b; font-size: 13px; max-width: 520px; margin: 0 auto 16px; line-height: 1.6;">
+                            点击右上角<b>【⚡ 自动生成本周周报】</b>，系统将自动汇总您本周在禅道完成的全部任务，按项目分组填充为《应用组周报》标准格式，并提供所见即所得在线预览与 Excel 一键导出。
+                        </p>
+                        <button type="button" class="btn btn-primary" id="btnGenerateWeeklyReportEmpty">⚡ 立即生成本周周报</button>
+                    </div>
+
+                    <!-- 周报生成后：在线预览与实时编辑区 -->
+                    <div class="report-preview-container" id="reportPreviewContainer" style="display: none;">
+                        <div class="preview-toolbar">
+                            <div class="preview-toolbar-left">
+                                <span class="preview-badge">📋 周报在线拟真预览</span>
+                                <span class="preview-tip">（已应用 Excel 模板排版与边框，支持直接在线修改文字）</span>
+                            </div>
+                            <div class="preview-toolbar-right">
+                                <button type="button" class="btn btn-secondary btn-sm" id="btnAddSummaryItem">➕ 增加总结项目</button>
+                                <button type="button" class="btn btn-secondary btn-sm" id="btnAddPlanItem">➕ 增加计划项目</button>
+                                <button type="button" class="btn btn-success" id="btnExportWeeklyReport2">
+                                    📥 导出周报 (.xlsx)
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Excel 拟真预览表格 -->
+                        <div class="excel-paper-wrapper">
+                            <table class="excel-report-table" id="excelReportTable">
+                                <!-- 动态注入 Excel 结构 -->
+                            </table>
+                        </div>
+
+                        <!-- 底部醒目导出按钮 -->
+                        <div class="preview-footer-actions">
+                            <button type="button" class="btn btn-success" id="btnExportWeeklyReportBottom" style="padding: 10px 24px; font-size: 14px; font-weight: 600;">
+                                📥 立即导出为 Excel 周报 (.xlsx)
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- 全局模态弹窗 (Modal) -->
+        <div class="modal-backdrop" id="appModal" style="display: none;">
+            <div class="modal-dialog">
+                <div class="modal-header">
+                    <h3 class="modal-title" id="modalTitle">提示</h3>
+                    <button class="modal-close" id="modalCloseBtn">&times;</button>
+                </div>
+                <div class="modal-body" id="modalBody">
+                    <!-- 动态内容 -->
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-primary" id="modalConfirmBtn">知道了</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 切换登录人/用户登录弹窗 -->
+        <div class="modal-backdrop" id="loginModal" style="display: none;">
+            <div class="modal-dialog" style="max-width: 440px;">
+                <div class="modal-header">
+                    <h3 class="modal-title" id="loginModalTitle">切换禅道登录人</h3>
+                    <button class="modal-close" id="loginModalCloseBtn">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <form id="loginForm" onsubmit="return false;">
+                        <div class="form-group" style="margin-bottom: 14px;">
+                            <label>禅道系统地址</label>
+                            <input type="text" id="loginUrl" class="form-control" value="https://bkgtsoft.chandao.com" placeholder="https://...">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 14px;">
+                            <label>登录账号</label>
+                            <input type="text" id="loginAccount" class="form-control" placeholder="请输入禅道账号 (如 wanglinmiao)">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 14px;">
+                            <label>登录密码</label>
+                            <div class="password-input-wrapper">
+                                <input type="password" id="loginPassword" class="form-control" placeholder="请输入禅道密码">
+                                <button type="button" class="btn-toggle-pwd" id="btnTogglePwd" title="显示明文密码" tabindex="-1">
+                                    <svg class="icon-eye-off" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                                        <line x1="1" y1="1" x2="23" y2="23"></line>
+                                    </svg>
+                                    <svg class="icon-eye-on" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
+                                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                                        <circle cx="12" cy="12" r="3"></circle>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 8px;">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="loginRemember" checked>
+                                <span>记住登录凭据 (仅保存在当前浏览器)</span>
+                            </label>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
+                    <button class="btn btn-danger-ghost btn-sm" id="btnLogoutInModal">🚪 退出当前登录</button>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-secondary btn-sm" id="loginCancelBtn">取消</button>
+                        <button class="btn btn-primary btn-sm" id="loginSubmitBtn">确认登录 / 切换</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 加载与执行进度遮罩 -->
+        <div class="loading-overlay" id="loadingOverlay" style="display: none;">
+            <div class="loading-card" id="loadingCard">
+                <!-- 普通加载模式：转圈动画 -->
+                <div class="spinner-container" id="loadingSpinnerBox">
+                    <div class="spinner"></div>
+                </div>
+
+                <!-- 批量执行进度条模式：高质感现代进度条与实时计数 -->
+                <div class="progress-container" id="loadingProgressBox" style="display: none;">
+                    <div class="progress-header">
+                        <div class="progress-title-wrap">
+                            <span class="progress-pulse-dot"></span>
+                            <span class="progress-title" id="progressTitle">正在批量执行任务</span>
+                        </div>
+                        <span class="progress-percent" id="progressPercent">0%</span>
+                    </div>
+
+                    <!-- 进度条轨道 -->
+                    <div class="progress-track">
+                        <div class="progress-bar" id="progressBar" style="width: 0%;"></div>
+                    </div>
+
+                    <!-- 进度数字与状态标签：展示已执行数/总数 -->
+                    <div class="progress-meta">
+                        <div class="progress-count-box">
+                            <span class="count-label">已执行数：</span>
+                            <span class="count-val"><strong id="progressCurrent">0</strong> / <span id="progressTotal">0</span></span>
+                        </div>
+                        <div class="progress-status-badge" id="progressStatusBadge">执行中</div>
+                    </div>
+
+                    <!-- 当前处理任务详情 -->
+                    <div class="progress-current-task" id="progressCurrentTask" style="display: none;">
+                        <span class="task-step-tag">当前</span>
+                        <span class="task-step-name" id="progressTaskName">-</span>
+                    </div>
+                </div>
+
+                <p id="loadingText" class="loading-desc">正在处理中，请稍候...</p>
+            </div>
+        </div>
+
+        <!-- ==================== 模块 4：AI Agent 桌宠与智能对话面板 ==================== -->
+        <div class="ai-pet-widget-container" id="aiPetContainer">
+            <!-- 气泡提示语 -->
+            <div class="pet-speech-bubble" id="petSpeechBubble">
+                <span class="bubble-text" id="petBubbleText">嗨！我是小禅 AI 助手，点我查任务、一键写周报哦~</span>
+                <span class="bubble-close" id="btnPetBubbleClose" title="关闭气泡">&times;</span>
+            </div>
+
+            <!-- 可爱桌宠本体 (带动画 SVG 头像) -->
+            <div class="pet-avatar-wrapper" id="petAvatarBtn" title="点击与小禅 AI 助手对话 (可按住拖拽移动)">
+                <div class="pet-halo"></div>
+                <div class="pet-avatar-svg">
+                    <svg viewBox="0 0 100 100" class="pet-svg-icon" width="60" height="60">
+                        <defs>
+                            <linearGradient id="petGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" stop-color="#38bdf8"/>
+                                <stop offset="100%" stop-color="#2563eb"/>
+                            </linearGradient>
+                            <linearGradient id="earGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" stop-color="#60a5fa"/>
+                                <stop offset="100%" stop-color="#1d4ed8"/>
+                            </linearGradient>
+                        </defs>
+                        <!-- 耳朵/天线 -->
+                        <polygon points="25,25 35,5 45,22" fill="url(#earGrad)" />
+                        <polygon points="75,25 65,5 55,22" fill="url(#earGrad)" />
+                        <circle cx="35" cy="5" r="4" fill="#38bdf8" />
+                        <circle cx="65" cy="5" r="4" fill="#38bdf8" />
+                        <!-- 脸部外壳 -->
+                        <rect x="15" y="20" width="70" height="60" rx="30" fill="url(#petGrad)" />
+                        <!-- 屏幕面罩 -->
+                        <rect x="22" y="30" width="56" height="38" rx="19" fill="#0f172a" />
+                        <!-- 眼睛 (带眨眼动画) -->
+                        <ellipse cx="38" cy="48" rx="5" ry="7" fill="#38bdf8" class="pet-eye" />
+                        <ellipse cx="62" cy="48" rx="5" ry="7" fill="#38bdf8" class="pet-eye" />
+                        <!-- 腮红 -->
+                        <circle cx="30" cy="56" r="3" fill="#f472b6" opacity="0.6"/>
+                        <circle cx="70" cy="56" r="3" fill="#f472b6" opacity="0.6"/>
+                        <!-- 嘴巴/微笑 -->
+                        <path d="M 46 54 Q 50 58 54 54" stroke="#38bdf8" stroke-width="2" fill="none" stroke-linecap="round"/>
+                    </svg>
+                </div>
+                <div class="pet-status-dot online" id="petStatusDot" title="AI Agent 准备就绪"></div>
+            </div>
+
+            <!-- AI Agent 智能对话面板 -->
+            <div class="ai-chat-panel" id="aiChatPanel" style="display: none;">
+                <!-- 面板顶栏 -->
+                <div class="chat-panel-header">
+                    <div class="chat-header-info">
+                        <div class="chat-pet-badge">🤖</div>
+                        <div>
+                            <div class="chat-title">小禅 AI 智囊</div>
+                            <div class="chat-subtitle" id="chatModelBadge">DeepSeek-V3 驱动</div>
+                        </div>
+                    </div>
+                    <div class="chat-header-actions">
+                        <button type="button" class="chat-btn-icon" id="btnAiSettings" title="设置 DeepSeek API Key">⚙️</button>
+                        <button type="button" class="chat-btn-icon" id="btnAiClear" title="清空对话历史">🧹</button>
+                        <button type="button" class="chat-btn-icon" id="btnAiClose" title="收起对话">&times;</button>
+                    </div>
+                </div>
+
+                <!-- DeepSeek 配置抽屉 -->
+                <div class="ai-settings-drawer" id="aiSettingsDrawer" style="display: none;">
+                    <div class="drawer-header">
+                        <h4>⚙️ DeepSeek 配置</h4>
+                        <span class="drawer-close" id="btnDrawerClose">&times;</span>
+                    </div>
+                    <div class="drawer-body">
+                        <div class="drawer-field">
+                            <label>DeepSeek API Key：</label>
+                            <div class="password-input-wrapper">
+                                <input type="password" id="inputDeepSeekKey" class="form-control" placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx" autocomplete="off">
+                                <button type="button" class="btn-toggle-pwd" id="btnToggleAiKey" title="显示/隐藏明文">👁️</button>
+                            </div>
+                            <span class="drawer-tip">Key 将保存在您的浏览器中，调用 DeepSeek 官方 API。</span>
+                        </div>
+                        <div class="drawer-field">
+                            <label>模型选择：</label>
+                            <select id="selectDeepSeekModel" class="form-control">
+                                <option value="deepseek-chat" selected>deepseek-chat (推荐，支持 Agent 工具调用)</option>
+                                <option value="deepseek-reasoner">deepseek-reasoner (深度推理 R1)</option>
+                            </select>
+                        </div>
+                        <div class="drawer-actions">
+                            <button type="button" class="btn btn-secondary btn-sm" id="btnTestAiKey">测试连接</button>
+                            <button type="button" class="btn btn-primary btn-sm" id="btnSaveAiKey">保存配置</button>
+                        </div>
+                        <div id="aiKeyTestFeedback" style="display: none; font-size: 12px; margin-top: 8px;"></div>
+                    </div>
+                </div>
+
+                <!-- 消息对话区 -->
+                <div class="chat-messages-container" id="chatMessagesContainer">
+                    <!-- 消息列表由 JS 动态渲染 -->
+                </div>
+
+                <!-- 快捷提问胶囊 -->
+                <div class="chat-quick-chips">
+                    <button type="button" class="chip-btn" data-prompt="查一下我名下有哪些未完成的任务？">🔍 我的待办</button>
+                    <button type="button" class="chip-btn" data-prompt="帮我把所有未完成的待办任务一键全部完成">⚡ 一键全完成</button>
+                    <button type="button" class="chip-btn" data-prompt="帮我统计并生成我本周的工作周报">📊 生成本周周报</button>
+                    <button type="button" class="chip-btn" data-prompt="系统里当前有哪些项目？">📁 查询所有项目</button>
+                </div>
+
+                <!-- 底部输入区 -->
+                <div class="chat-input-bar">
+                    <textarea id="aiChatInput" class="chat-textarea" placeholder="和小禅聊聊，如：查一下武穴项目的任务... (Enter 发送)" rows="1"></textarea>
+                    <button type="button" class="btn-send-ai" id="btnSendAi" title="发送 (Enter)">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="static/js/app.js?v=26"></script>
+</body>
+</html>
