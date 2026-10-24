@@ -8,7 +8,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentActiveTasks = [];
     let currentQueryTasks = [];
     let selectedTaskIds = new Set();
-    let currentAccount = 'wanglinmiao';
+    let mySelectedTaskIds = new Set();
+    let currentAccount = '';
     let currentUserRealname = '';
     let cachedProjects = [];
     let cachedUsers = [];
@@ -48,6 +49,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnExecuteBatchFinish = document.getElementById('btnExecuteBatchFinish');
     const batchFinishInterval = document.getElementById('batchFinishInterval');
     const batchFinishComment = document.getElementById('batchFinishComment');
+    const checkAllMyTasks = document.getElementById('checkAllMyTasks');
+    const mySelectedCount = document.getElementById('mySelectedCount');
+    const btnMySelectAll = document.getElementById('btnMySelectAll');
+    const btnMyDeselectAll = document.getElementById('btnMyDeselectAll');
 
     const btnSearch = document.getElementById('btnSearch');
     const queryTableBody = document.getElementById('queryTableBody');
@@ -347,22 +352,35 @@ document.addEventListener('DOMContentLoaded', () => {
                 loadUsers().then(() => {
                     initFilterUserSelect();
                 });
+
+                // 按当前登录账号隔离加载专属 AI 对话历史
+                switchAiUserAccount(data.account, data.realname || data.account);
             } else {
                 statusDot.className = 'dot offline';
                 statusText.textContent = '未登录 (点击登录)';
                 userChip.style.display = 'none';
                 if (btnHeaderLogin) btnHeaderLogin.style.display = 'inline-flex';
 
+                currentAccount = '';
+                currentUserRealname = '';
+
                 // 未登录状态下清空任务列表
-                myTasksTableBody.innerHTML = `<tr><td colspan="7" class="empty-cell">未登录禅道账号。请点击右上角【🔑 登录禅道】进行登录。</td></tr>`;
+                myTasksTableBody.innerHTML = `<tr><td colspan="8" class="empty-cell">未登录禅道账号。请点击右上角【🔑 登录禅道】进行登录。</td></tr>`;
                 myActiveBadge.textContent = '0';
                 updateMyTasksHoursSummary([]);
+
+                // 切换到未登录状态下的 AI 对话隔离空间
+                switchAiUserAccount('', '');
             }
         } catch (e) {
             statusDot.className = 'dot offline';
             statusText.textContent = '连接异常 (点击重试)';
             userChip.style.display = 'none';
             if (btnHeaderLogin) btnHeaderLogin.style.display = 'inline-flex';
+
+            currentAccount = '';
+            currentUserRealname = '';
+            switchAiUserAccount('', '');
         }
     }
 
@@ -1011,8 +1029,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 await fetch(apiUrl('/api/logout'), { method: 'POST' });
                 hideLoading();
                 closeLoginModal();
+                currentAccount = '';
+                currentUserRealname = '';
+                switchAiUserAccount('', '');
                 await checkStatus();
-                myTasksTableBody.innerHTML = `<tr><td colspan="7" class="empty-cell">已退出登录。可点击右上角登录状态重新登录。</td></tr>`;
+                myTasksTableBody.innerHTML = `<tr><td colspan="8" class="empty-cell">已退出登录。可点击右上角登录状态重新登录。</td></tr>`;
                 myActiveBadge.textContent = '0';
                 openLoginModal(false);
             } catch (e) {
@@ -1040,21 +1061,116 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // 3. 模块一：加载我的待办未完成任务
+    // 3. 模块一：待办任务勾选与统计逻辑
+    function updateMySelectedCount() {
+        const total = currentActiveTasks.length;
+        const count = mySelectedTaskIds.size;
+        if (mySelectedCount) {
+            mySelectedCount.textContent = count;
+        }
+
+        // 更新表头全选框状态 (支持 indeterminate 状态)
+        if (checkAllMyTasks) {
+            if (total === 0 || count === 0) {
+                checkAllMyTasks.checked = false;
+                checkAllMyTasks.indeterminate = false;
+            } else if (count === total) {
+                checkAllMyTasks.checked = true;
+                checkAllMyTasks.indeterminate = false;
+            } else {
+                checkAllMyTasks.checked = false;
+                checkAllMyTasks.indeterminate = true;
+            }
+        }
+
+        // 动态更新一键批量完成按钮文案与状态
+        if (btnExecuteBatchFinish) {
+            if (count > 0) {
+                btnExecuteBatchFinish.innerHTML = `⚡ 一键批量完成已选 (<strong>${count}</strong> 个任务)`;
+                btnExecuteBatchFinish.disabled = false;
+            } else {
+                btnExecuteBatchFinish.innerHTML = `⚡ 一键批量完成 (请先勾选待办)`;
+                btnExecuteBatchFinish.disabled = false;
+            }
+        }
+    }
+
+    // 全选/取消全选待办任务
+    if (checkAllMyTasks) {
+        checkAllMyTasks.addEventListener('change', (e) => {
+            const checked = e.target.checked;
+            if (checked) {
+                currentActiveTasks.forEach(t => mySelectedTaskIds.add(String(t.id)));
+            } else {
+                mySelectedTaskIds.clear();
+            }
+            if (myTasksTableBody) {
+                myTasksTableBody.querySelectorAll('.my-task-checkbox').forEach(cb => {
+                    cb.checked = checked;
+                    const tr = cb.closest('tr');
+                    if (tr) {
+                        if (checked) tr.classList.add('row-selected');
+                        else tr.classList.remove('row-selected');
+                    }
+                });
+            }
+            updateMySelectedCount();
+        });
+    }
+
+    if (btnMySelectAll) {
+        btnMySelectAll.onclick = () => {
+            currentActiveTasks.forEach(t => mySelectedTaskIds.add(String(t.id)));
+            if (myTasksTableBody) {
+                myTasksTableBody.querySelectorAll('.my-task-checkbox').forEach(cb => {
+                    cb.checked = true;
+                    const tr = cb.closest('tr');
+                    if (tr) tr.classList.add('row-selected');
+                });
+            }
+            updateMySelectedCount();
+        };
+    }
+
+    if (btnMyDeselectAll) {
+        btnMyDeselectAll.onclick = () => {
+            mySelectedTaskIds.clear();
+            if (myTasksTableBody) {
+                myTasksTableBody.querySelectorAll('.my-task-checkbox').forEach(cb => {
+                    cb.checked = false;
+                    const tr = cb.closest('tr');
+                    if (tr) tr.classList.remove('row-selected');
+                });
+            }
+            updateMySelectedCount();
+        };
+    }
+
+    // 加载我的待办未完成任务
     async function loadMyActiveTasks() {
-        myTasksTableBody.innerHTML = `<tr><td colspan="7" class="empty-cell">正在查询指派给您的待办任务...</td></tr>`;
+        myTasksTableBody.innerHTML = `<tr><td colspan="8" class="empty-cell">正在查询指派给您的待办任务...</td></tr>`;
         try {
             const res = await fetch(apiUrl('/api/my-active-tasks'));
             const json = await res.json();
             if (json.success) {
                 currentActiveTasks = json.tasks || [];
                 myActiveBadge.textContent = currentActiveTasks.length;
+
+                // 默认全选拉取到的所有待办任务，方便用户一键批量流转，也可以单独勾选取消
+                mySelectedTaskIds.clear();
+                currentActiveTasks.forEach(t => mySelectedTaskIds.add(String(t.id)));
+
                 renderMyTasks(currentActiveTasks);
+                updateMySelectedCount();
             } else {
-                myTasksTableBody.innerHTML = `<tr><td colspan="7" class="empty-cell" style="color:red;">查询失败: ${json.message}</td></tr>`;
+                myTasksTableBody.innerHTML = `<tr><td colspan="8" class="empty-cell" style="color:red;">查询失败: ${json.message}</td></tr>`;
+                mySelectedTaskIds.clear();
+                updateMySelectedCount();
             }
         } catch (e) {
-            myTasksTableBody.innerHTML = `<tr><td colspan="7" class="empty-cell" style="color:red;">网络异常: ${e}</td></tr>`;
+            myTasksTableBody.innerHTML = `<tr><td colspan="8" class="empty-cell" style="color:red;">网络异常: ${e}</td></tr>`;
+            mySelectedTaskIds.clear();
+            updateMySelectedCount();
         }
     }
 
@@ -1062,7 +1178,8 @@ document.addEventListener('DOMContentLoaded', () => {
         updateMyTasksHoursSummary(tasks);
 
         if (!tasks || tasks.length === 0) {
-            myTasksTableBody.innerHTML = `<tr><td colspan="7" class="empty-cell">🎉 当前没有指派给您的未完成任务！太棒了！</td></tr>`;
+            myTasksTableBody.innerHTML = `<tr><td colspan="8" class="empty-cell">🎉 当前没有指派给您的未完成任务！太棒了！</td></tr>`;
+            updateMySelectedCount();
             return;
         }
 
@@ -1076,8 +1193,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 ? `<span class="est-tag est-valid">⚡ ${estVal}h (可自动报工)</span>`
                 : `<span class="est-tag est-missing">⚠️ 未填写 (将跳过)</span>`;
 
+            const taskIdStr = String(t.id);
+            const isChecked = mySelectedTaskIds.has(taskIdStr);
+
             html += `
-                <tr>
+                <tr data-task-id="${t.id}" class="${isChecked ? 'row-selected' : ''}">
+                    <td style="text-align:center;">
+                        <input type="checkbox" class="my-task-checkbox" data-id="${t.id}" ${isChecked ? 'checked' : ''}>
+                    </td>
                     <td><strong>#${t.id}</strong></td>
                     <td>${escapeHtml(t.name)}</td>
                     <td><span class="status-tag ${st.class}">${st.label}</span></td>
@@ -1089,19 +1212,43 @@ document.addEventListener('DOMContentLoaded', () => {
             `;
         });
         myTasksTableBody.innerHTML = html;
+
+        // 绑定每行复选框变更事件
+        myTasksTableBody.querySelectorAll('.my-task-checkbox').forEach(cb => {
+            cb.addEventListener('change', (e) => {
+                const id = e.target.getAttribute('data-id');
+                const tr = e.target.closest('tr');
+                if (e.target.checked) {
+                    mySelectedTaskIds.add(id);
+                    if (tr) tr.classList.add('row-selected');
+                } else {
+                    mySelectedTaskIds.delete(id);
+                    if (tr) tr.classList.remove('row-selected');
+                }
+                updateMySelectedCount();
+            });
+        });
+
+        updateMySelectedCount();
     }
 
     btnRefreshMyTasks.onclick = loadMyActiveTasks;
 
-    // 4. 模块一核心操作：一键批量完成
+    // 4. 模块一核心操作：一键批量完成勾选的待办任务
     btnExecuteBatchFinish.onclick = async () => {
         if (currentActiveTasks.length === 0) {
             alert('当前没有待完成的待办任务！');
             return;
         }
 
-        const validCount = currentActiveTasks.filter(t => (parseFloat(t.estimate) || 0) > 0).length;
-        const skipCount = currentActiveTasks.length - validCount;
+        if (mySelectedTaskIds.size === 0) {
+            alert('请先勾选需要批量完成的待办任务！');
+            return;
+        }
+
+        const selectedTasks = currentActiveTasks.filter(t => mySelectedTaskIds.has(String(t.id)));
+        const validCount = selectedTasks.filter(t => (parseFloat(t.estimate) || 0) > 0).length;
+        const skipCount = selectedTasks.length - validCount;
 
         // 获取参数：每步间隔时间与可选备注
         let intervalSec = batchFinishInterval ? parseFloat(batchFinishInterval.value) : 1.0;
@@ -1111,23 +1258,24 @@ document.addEventListener('DOMContentLoaded', () => {
         const commentText = batchFinishComment ? batchFinishComment.value.trim() : '';
 
         const approxSeconds = Math.round(validCount * (intervalSec > 0 ? (intervalSec * 1.5 + 0.5) : 0.5));
-        const confirmMsg = `当前共有 ${currentActiveTasks.length} 个未完成任务：\n` +
+        const confirmMsg = `已勾选 ${selectedTasks.length} 个待办任务：\n` +
             `• 符合预计耗时、将自动流转并报工完成：${validCount} 个\n` +
             `• 缺少预计工时、将被自动跳过：${skipCount} 个\n` +
             `• 步骤间隔时间：${intervalSec} 秒/步 (防脚本检测)\n` +
             `• 完成备注：${commentText ? commentText : '无备注 (留空未填)'}\n` +
             (intervalSec > 0 && validCount > 0 ? `• 预计总耗时：约 ${approxSeconds} 秒 (已启用连接断线自动恢复)\n\n` : `\n`) +
-            `确定要立即执行批量完成吗？`;
+            `确定要立即执行批量完成已选的 ${selectedTasks.length} 个任务吗？`;
 
         if (!confirm(confirmMsg)) return;
 
-        showProgressLoading('⚡ 批量流转完成我的任务', 0, currentActiveTasks.length, `正在准备执行（每步间隔 ${intervalSec}s）...`);
+        showProgressLoading('⚡ 批量流转完成已选任务', 0, selectedTasks.length, `正在准备执行（每步间隔 ${intervalSec}s）...`);
 
         try {
             const res = await fetch(apiUrl('/api/batch-finish'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
+                    task_ids: Array.from(mySelectedTaskIds),
                     interval_seconds: intervalSec,
                     comment: commentText,
                     stream: true
@@ -1198,7 +1346,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 showModal('批量流转完成执行汇总', modalHtml);
-                loadMyActiveTasks(); // 刷新待办列表
+                loadMyActiveTasks(); // 刷新待办列表并重新同步状态
             } else {
                 alert('执行异常: ' + resJson.message);
             }
@@ -2342,13 +2490,42 @@ document.addEventListener('DOMContentLoaded', () => {
     const aiChatInput = document.getElementById('aiChatInput');
     const btnSendAi = document.getElementById('btnSendAi');
     const chatModelBadge = document.getElementById('chatModelBadge');
+    const chatAccountBadge = document.getElementById('chatAccountBadge');
+
+    // 多会话与历史管理 DOM 元素
+    const btnToggleAiHistory = document.getElementById('btnToggleAiHistory');
+    const aiHistoryCountBadge = document.getElementById('aiHistoryCountBadge');
+    const chatSessionTitle = document.getElementById('chatSessionTitle');
+    const btnRenameSession = document.getElementById('btnRenameSession');
+    const btnAiNewChat = document.getElementById('btnAiNewChat');
+    const btnCopyEntireChat = document.getElementById('btnCopyEntireChat');
+    const aiHistoryDrawer = document.getElementById('aiHistoryDrawer');
+    const btnHistoryDrawerClose = document.getElementById('btnHistoryDrawerClose');
+    const btnDrawerNewChat = document.getElementById('btnDrawerNewChat');
+    const aiSessionList = document.getElementById('aiSessionList');
+    const historyTotalCount = document.getElementById('historyTotalCount');
+    const btnClearAllHistory = document.getElementById('btnClearAllHistory');
 
     // 本地存储 key
     const STORAGE_KEY_DEEPSEEK = 'zentao_deepseek_api_key';
     const STORAGE_KEY_MODEL = 'zentao_deepseek_model';
 
+    // 基于当前登录账号动态隔离存储 key
+    function getSessionsStorageKey(account = currentAccount) {
+        const acc = (account || '').trim().toLowerCase();
+        if (!acc) return 'zentao_ai_chat_sessions_guest';
+        return `zentao_ai_chat_sessions_user_${acc}`;
+    }
+
+    function getActiveSessionStorageKey(account = currentAccount) {
+        const acc = (account || '').trim().toLowerCase();
+        if (!acc) return 'zentao_ai_active_id_guest';
+        return `zentao_ai_active_id_user_${acc}`;
+    }
+
     let isAiGenerating = false;
-    let chatHistory = []; // 对话上下文 [{role: 'user'|'assistant', content: '...'}]
+    let aiSessions = [];
+    let activeSessionId = null;
 
     // 1. 初始化读取配置
     function initAiConfig() {
@@ -2514,8 +2691,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 aiChatPanel.style.display = isOpen ? 'none' : 'flex';
                 if (!isOpen) {
                     if (petSpeechBubble) petSpeechBubble.style.display = 'none';
-                    if (chatMessagesContainer && chatMessagesContainer.children.length === 0) {
-                        showWelcomeMessage();
+                    if (aiSessions.length === 0) {
+                        initAiSessions();
+                    } else {
+                        renderActiveSessionMessages();
                     }
                     if (aiChatInput) setTimeout(() => aiChatInput.focus(), 150);
                 }
@@ -2532,6 +2711,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (btnAiClose) {
         btnAiClose.onclick = () => {
             if (aiChatPanel) aiChatPanel.style.display = 'none';
+            if (aiHistoryDrawer) aiHistoryDrawer.style.display = 'none';
         };
     }
 
@@ -2540,6 +2720,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (aiSettingsDrawer) {
                 const isShow = aiSettingsDrawer.style.display === 'block';
                 aiSettingsDrawer.style.display = isShow ? 'none' : 'block';
+                if (!isShow && aiHistoryDrawer) {
+                    aiHistoryDrawer.style.display = 'none';
+                }
             }
         };
     }
@@ -2550,14 +2733,75 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
-    if (btnAiClear) {
-        btnAiClear.onclick = () => {
-            if (confirm('确定要清空当前的 AI 对话记录吗？')) {
-                chatHistory = [];
-                if (chatMessagesContainer) chatMessagesContainer.innerHTML = '';
-                showWelcomeMessage();
+    if (btnToggleAiHistory) {
+        btnToggleAiHistory.onclick = () => {
+            if (aiHistoryDrawer) {
+                const isShow = aiHistoryDrawer.style.display === 'flex';
+                aiHistoryDrawer.style.display = isShow ? 'none' : 'flex';
+                if (!isShow) {
+                    if (aiSettingsDrawer) aiSettingsDrawer.style.display = 'none';
+                    renderSessionList();
+                }
             }
         };
+    }
+
+    if (btnHistoryDrawerClose) {
+        btnHistoryDrawerClose.onclick = () => {
+            if (aiHistoryDrawer) aiHistoryDrawer.style.display = 'none';
+        };
+    }
+
+    if (btnAiNewChat) {
+        btnAiNewChat.onclick = createNewSession;
+    }
+
+    // 一键复制当前会话的全部记录
+    if (btnCopyEntireChat) {
+        btnCopyEntireChat.onclick = async () => {
+            const session = getActiveSession();
+            if (!session || !session.messages || session.messages.length === 0) {
+                alert('当前暂无对话内容可复制');
+                return;
+            }
+            let fullText = `# 🤖 小禅 AI 智能助手对话记录\n会话主题：${session.title || '新对话'}\n生成时间：${new Date().toLocaleString()}\n\n---\n\n`;
+            session.messages.forEach(m => {
+                const roleName = m.role === 'user' ? '👤 我' : '🤖 小禅 AI';
+                fullText += `### ${roleName} (${m.time || ''})\n\n${m.content}\n\n`;
+            });
+            try {
+                await navigator.clipboard.writeText(fullText);
+                alert('✓ 已成功复制当前对话全部内容至剪贴板！可直接粘贴至 Word、Markdown 或微信。');
+            } catch (err) {
+                const ta = document.createElement('textarea');
+                ta.value = fullText;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                alert('✓ 已成功复制当前对话全部内容至剪贴板！可直接粘贴至 Word、Markdown 或微信。');
+            }
+        };
+    }
+
+    if (btnDrawerNewChat) {
+        btnDrawerNewChat.onclick = createNewSession;
+    }
+
+    if (btnRenameSession) {
+        btnRenameSession.onclick = () => promptRenameSession(activeSessionId);
+    }
+
+    if (chatSessionTitle) {
+        chatSessionTitle.onclick = () => promptRenameSession(activeSessionId);
+    }
+
+    if (btnAiClear) {
+        btnAiClear.onclick = clearCurrentSession;
+    }
+
+    if (btnClearAllHistory) {
+        btnClearAllHistory.onclick = clearAllHistorySessions;
     }
 
     // 6. 快捷提问胶囊绑定
@@ -2656,19 +2900,348 @@ document.addEventListener('DOMContentLoaded', () => {
         return finalHtml || text.replace(/\n/g, '<br>');
     }
 
-    // 8. 展现欢迎消息
-    function showWelcomeMessage() {
+    // 8. 欢迎语模板与多会话辅助工具
+    function getAiWelcomeText() {
+        const name = currentUserRealname || currentAccount;
+        if (name) {
+            return `您好，**${escapeHtml(name)}**！我是您的禅道桌面伴侣 **「小禅」** 🤖。\n\n我可以帮您通过 DeepSeek 模型与禅道系统实时协同：\n- 🔍 **查询名下待办任务与工时**\n- ⚡ **一键批量将待办切为进行中并点击完成**\n- 📝 **批量修改任务名称与描述**\n- 📊 **汇总并生成符合标准格式的工作周报**\n- 📁 **检索禅道里的所有项目与详情**\n\n有什么我可以协助您的吗？您可以在下方直接提问，或点击预设胶囊快捷体验~`;
+        }
+        return `您好！我是您的禅道桌面伴侣 **「小禅」** 🤖。\n\n*（当前处于未登录状态，登录后可为您专属查询名下待办、一键批量报工与定制周报）*\n\n您可以点击右上角 **【🔑 登录禅道】** 完成登录。若已配置 DeepSeek API Key，您也可以在此咨询任何关于禅道操作的问题！`;
+    }
+
+    function getCurrentTimeStr() {
+        const d = new Date();
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function formatSessionTime(timestamp) {
+        if (!timestamp) return '';
+        const d = new Date(timestamp);
+        const now = new Date();
+        const isToday = d.toDateString() === now.toDateString();
+        const pad = (n) => String(n).padStart(2, '0');
+        const timeStr = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        if (isToday) {
+            return `今天 ${timeStr}`;
+        }
+        const isThisYear = d.getFullYear() === now.getFullYear();
+        if (isThisYear) {
+            return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${timeStr}`;
+        }
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    }
+
+    function createSessionObject(title = '新对话', initialMessages = null) {
+        const now = Date.now();
+        return {
+            id: 'session_' + now + '_' + Math.random().toString(36).substr(2, 5),
+            title: title || '新对话',
+            createdAt: now,
+            updatedAt: now,
+            messages: initialMessages || [
+                {
+                    role: 'ai',
+                    content: getAiWelcomeText(),
+                    toolHistory: [],
+                    time: getCurrentTimeStr()
+                }
+            ]
+        };
+    }
+
+    // 初始化多会话与历史记录（严格按当前账号隔离读取）
+    function initAiSessions() {
+        const storageKeySessions = getSessionsStorageKey();
+        const storageKeyActiveId = getActiveSessionStorageKey();
+        aiSessions = [];
+        activeSessionId = null;
+
+        try {
+            let raw = localStorage.getItem(storageKeySessions);
+
+            // 兼容旧版全局迁移：如果当前登录账号且专属 key 尚无数据，但存在旧版全局数据，则迁移至当前账号并清理全局 key
+            if (!raw && currentAccount) {
+                const oldRaw = localStorage.getItem('zentao_ai_chat_sessions_v2');
+                if (oldRaw) {
+                    raw = oldRaw;
+                    localStorage.setItem(storageKeySessions, oldRaw);
+                    localStorage.removeItem('zentao_ai_chat_sessions_v2');
+                    const oldActive = localStorage.getItem('zentao_ai_active_session_id');
+                    if (oldActive) {
+                        localStorage.setItem(storageKeyActiveId, oldActive);
+                        localStorage.removeItem('zentao_ai_active_session_id');
+                    }
+                }
+            }
+
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    aiSessions = parsed;
+                }
+            }
+        } catch (e) {
+            console.error('读取对话历史记录失败:', e);
+        }
+
+        if (!aiSessions || aiSessions.length === 0) {
+            aiSessions = [createSessionObject('新对话')];
+        }
+
+        const savedActiveId = localStorage.getItem(storageKeyActiveId);
+        if (savedActiveId && aiSessions.some(s => s.id === savedActiveId)) {
+            activeSessionId = savedActiveId;
+        } else {
+            activeSessionId = aiSessions[0].id;
+        }
+
+        saveAiSessions();
+        renderActiveSessionMessages();
+        renderSessionList();
+    }
+
+    function saveAiSessions() {
+        const storageKeySessions = getSessionsStorageKey();
+        const storageKeyActiveId = getActiveSessionStorageKey();
+        try {
+            localStorage.setItem(storageKeySessions, JSON.stringify(aiSessions));
+            if (activeSessionId) {
+                localStorage.setItem(storageKeyActiveId, activeSessionId);
+            }
+        } catch (e) {
+            console.error('保存对话历史失败:', e);
+        }
+        updateSessionMetaBadges();
+    }
+
+    function updateSessionMetaBadges() {
+        const count = aiSessions.length;
+        if (aiHistoryCountBadge) aiHistoryCountBadge.textContent = count;
+        if (historyTotalCount) historyTotalCount.textContent = count;
+        const active = getActiveSession();
+        if (chatSessionTitle) {
+            chatSessionTitle.textContent = active ? active.title : '新对话';
+        }
+        if (chatAccountBadge) {
+            if (currentAccount) {
+                chatAccountBadge.textContent = `@${currentAccount} · `;
+                chatAccountBadge.title = `当前绑定账号: ${currentUserRealname || currentAccount} (${currentAccount})`;
+                chatAccountBadge.style.color = '#93c5fd';
+            } else {
+                chatAccountBadge.textContent = `(未登录) · `;
+                chatAccountBadge.title = `未登录禅道账号，历史记录仅在本地访客空间临时隔离`;
+                chatAccountBadge.style.color = '#fbbf24';
+            }
+        }
+    }
+
+    // 切换当前 AI 账号会话空间并无缝刷新
+    function switchAiUserAccount(account, realname) {
+        currentAccount = (account || '').trim();
+        currentUserRealname = (realname || '').trim();
+        initAiSessions();
+    }
+
+    function getActiveSession() {
+        let session = aiSessions.find(s => s.id === activeSessionId);
+        if (!session && aiSessions.length > 0) {
+            session = aiSessions[0];
+            activeSessionId = session.id;
+        }
+        return session;
+    }
+
+    function renderActiveSessionMessages() {
         if (!chatMessagesContainer) return;
-        const welcomeText = `您好！我是您的禅道桌面伴侣 **「小禅」** 🤖。\n\n我可以帮您通过 DeepSeek 模型与禅道系统实时协同：\n- 🔍 **查询名下待办任务与工时**\n- ⚡ **一键批量将待办切为进行中并点击完成**\n- 📝 **批量修改任务名称与描述**\n- 📊 **汇总并生成符合标准格式的工作周报**\n- 📁 **检索禅道里的所有项目与详情**\n\n有什么我可以协助您的吗？您可以在下方直接提问，或点击预设胶囊快捷体验~`;
-        appendAiMessageToUI({
-            role: 'ai',
-            content: welcomeText,
-            toolHistory: []
+        chatMessagesContainer.innerHTML = '';
+        const session = getActiveSession();
+        if (!session) return;
+
+        if (chatSessionTitle) {
+            chatSessionTitle.textContent = session.title || '新对话';
+        }
+
+        if (!session.messages || session.messages.length === 0) {
+            session.messages = [
+                {
+                    role: 'ai',
+                    content: getAiWelcomeText(),
+                    toolHistory: [],
+                    time: getCurrentTimeStr()
+                }
+            ];
+            saveAiSessions();
+        }
+
+        session.messages.forEach(msg => {
+            appendAiMessageToUI({
+                role: msg.role === 'assistant' ? 'ai' : msg.role,
+                content: msg.content,
+                toolHistory: msg.toolHistory || [],
+                time: msg.time
+            });
+        });
+
+        chatMessagesContainer.scrollTop = chatMessagesContainer.scrollHeight;
+    }
+
+    function renderSessionList() {
+        updateSessionMetaBadges();
+        if (!aiSessionList) return;
+
+        if (!aiSessions || aiSessions.length === 0) {
+            aiSessionList.innerHTML = `<div style="text-align:center; padding:30px; color:#94a3b8; font-size:13px;">暂无历史对话记录</div>`;
+            return;
+        }
+
+        let html = '';
+        aiSessions.forEach(s => {
+            const isActive = s.id === activeSessionId;
+            const timeStr = formatSessionTime(s.updatedAt || s.createdAt);
+            const msgCount = (s.messages || []).length;
+            html += `
+                <div class="history-session-item ${isActive ? 'is-active' : ''}" data-id="${s.id}">
+                    <div class="session-icon">💬</div>
+                    <div class="session-main">
+                        <div class="session-title-text" title="${escapeHtml(s.title)}">${escapeHtml(s.title)}</div>
+                        <div class="session-meta">
+                            <span class="session-time">${timeStr}</span>
+                            <span class="session-count">${msgCount} 条消息</span>
+                        </div>
+                    </div>
+                    <div class="session-actions">
+                        <button type="button" class="btn-session-action btn-session-rename" title="重命名对话" data-id="${s.id}">✏️</button>
+                        <button type="button" class="btn-session-action btn-session-del" title="删除该对话" data-id="${s.id}">🗑️</button>
+                    </div>
+                </div>
+            `;
+        });
+        aiSessionList.innerHTML = html;
+
+        aiSessionList.querySelectorAll('.history-session-item').forEach(item => {
+            item.addEventListener('click', (e) => {
+                if (e.target.closest('.session-actions')) return;
+                const sid = item.getAttribute('data-id');
+                switchSession(sid);
+            });
+        });
+
+        aiSessionList.querySelectorAll('.btn-session-rename').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const sid = btn.getAttribute('data-id');
+                promptRenameSession(sid);
+            });
+        });
+
+        aiSessionList.querySelectorAll('.btn-session-del').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const sid = btn.getAttribute('data-id');
+                deleteSession(sid);
+            });
         });
     }
 
+    function switchSession(sid) {
+        if (!sid || sid === activeSessionId) {
+            if (aiHistoryDrawer) aiHistoryDrawer.style.display = 'none';
+            return;
+        }
+        activeSessionId = sid;
+        saveAiSessions();
+        renderActiveSessionMessages();
+        renderSessionList();
+        if (aiHistoryDrawer) aiHistoryDrawer.style.display = 'none';
+        if (aiChatInput) aiChatInput.focus();
+    }
+
+    function createNewSession() {
+        const newSession = createSessionObject('新对话');
+        aiSessions.unshift(newSession);
+        activeSessionId = newSession.id;
+        saveAiSessions();
+        renderActiveSessionMessages();
+        renderSessionList();
+        if (aiHistoryDrawer) aiHistoryDrawer.style.display = 'none';
+        if (aiChatInput) {
+            aiChatInput.value = '';
+            aiChatInput.focus();
+        }
+    }
+
+    function promptRenameSession(sid) {
+        const target = aiSessions.find(s => s.id === sid);
+        if (!target) return;
+        const newTitle = prompt('请输入该对话的新名称：', target.title);
+        if (newTitle !== null) {
+            const trimmed = newTitle.trim();
+            if (!trimmed) {
+                alert('对话名称不能为空！');
+                return;
+            }
+            target.title = trimmed;
+            target.updatedAt = Date.now();
+            saveAiSessions();
+            renderSessionList();
+            if (target.id === activeSessionId && chatSessionTitle) {
+                chatSessionTitle.textContent = target.title;
+            }
+        }
+    }
+
+    function deleteSession(sid) {
+        const target = aiSessions.find(s => s.id === sid);
+        if (!target) return;
+        if (!confirm(`确定要删除对话「${target.title}」及其所有历史记录吗？`)) return;
+
+        aiSessions = aiSessions.filter(s => s.id !== sid);
+        if (aiSessions.length === 0) {
+            const fallback = createSessionObject('新对话');
+            aiSessions = [fallback];
+            activeSessionId = fallback.id;
+        } else if (activeSessionId === sid) {
+            activeSessionId = aiSessions[0].id;
+        }
+        saveAiSessions();
+        renderActiveSessionMessages();
+        renderSessionList();
+    }
+
+    function clearCurrentSession() {
+        const session = getActiveSession();
+        if (!session) return;
+        if (!confirm(`确定要清空当前对话「${session.title}」的记录吗？`)) return;
+
+        session.title = '新对话';
+        session.updatedAt = Date.now();
+        session.messages = [
+            {
+                role: 'ai',
+                content: getAiWelcomeText(),
+                toolHistory: [],
+                time: getCurrentTimeStr()
+            }
+        ];
+        saveAiSessions();
+        renderActiveSessionMessages();
+        renderSessionList();
+    }
+
+    function clearAllHistorySessions() {
+        if (!confirm('确定要清空全部所有历史对话记录吗？此操作无法恢复！')) return;
+        const fresh = createSessionObject('新对话');
+        aiSessions = [fresh];
+        activeSessionId = fresh.id;
+        saveAiSessions();
+        renderActiveSessionMessages();
+        renderSessionList();
+        if (aiHistoryDrawer) aiHistoryDrawer.style.display = 'none';
+    }
+
     // 9. 添加消息气泡到 UI
-    function appendAiMessageToUI({ role, content, toolHistory, isTemp }) {
+    function appendAiMessageToUI({ role, content, toolHistory, time, isTemp }) {
         if (!chatMessagesContainer) return null;
 
         const row = document.createElement('div');
@@ -2706,6 +3279,54 @@ document.addEventListener('DOMContentLoaded', () => {
         contentDiv.innerHTML = role === 'user' ? escapeHtml(content).replace(/\n/g, '<br>') : renderMarkdownToHtml(content);
         bubble.appendChild(contentDiv);
 
+        if (!isTemp) {
+            const footerDiv = document.createElement('div');
+            footerDiv.className = 'chat-msg-footer';
+
+            // 一键复制该条内容按钮
+            const copyBtn = document.createElement('button');
+            copyBtn.type = 'button';
+            copyBtn.className = 'btn-msg-copy';
+            copyBtn.title = '复制该条消息全部内容';
+            copyBtn.innerHTML = '📋 复制';
+            copyBtn.onclick = async (e) => {
+                e.stopPropagation();
+                const copyText = content || '';
+                try {
+                    await navigator.clipboard.writeText(copyText);
+                    copyBtn.innerHTML = '✓ 已复制';
+                    copyBtn.classList.add('is-copied');
+                    setTimeout(() => {
+                        copyBtn.innerHTML = '📋 复制';
+                        copyBtn.classList.remove('is-copied');
+                    }, 1500);
+                } catch (err) {
+                    const ta = document.createElement('textarea');
+                    ta.value = copyText;
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    copyBtn.innerHTML = '✓ 已复制';
+                    copyBtn.classList.add('is-copied');
+                    setTimeout(() => {
+                        copyBtn.innerHTML = '📋 复制';
+                        copyBtn.classList.remove('is-copied');
+                    }, 1500);
+                }
+            };
+            footerDiv.appendChild(copyBtn);
+
+            if (time) {
+                const timeDiv = document.createElement('div');
+                timeDiv.className = 'chat-msg-time';
+                timeDiv.textContent = time;
+                footerDiv.appendChild(timeDiv);
+            }
+
+            bubble.appendChild(footerDiv);
+        }
+
         row.appendChild(avatar);
         row.appendChild(bubble);
         chatMessagesContainer.appendChild(row);
@@ -2721,30 +3342,68 @@ document.addEventListener('DOMContentLoaded', () => {
         const text = aiChatInput.value.trim();
         if (!text || isAiGenerating) return;
 
+        const session = getActiveSession();
+        if (!session) return;
+
+        // 未登录账号安全提醒与拦截
+        if (!currentAccount) {
+            appendAiMessageToUI({
+                role: 'user',
+                content: text,
+                time: getCurrentTimeStr()
+            });
+            appendAiMessageToUI({
+                role: 'ai',
+                content: '⚠️ 您当前尚未登录禅道账号。小禅的查询名下待办、批量报工、批量修改以及生成个人周报等功能均需要关联您的禅道账号身份。\n\n请点击右上角 **【🔑 登录禅道】** 完成登录后再试。',
+                time: getCurrentTimeStr()
+            });
+            aiChatInput.value = '';
+            openLoginModal(false);
+            return;
+        }
+
         // 检查 API Key
         const apiKey = localStorage.getItem(STORAGE_KEY_DEEPSEEK) || (inputDeepSeekKey ? inputDeepSeekKey.value.trim() : '');
         if (!apiKey) {
             appendAiMessageToUI({
                 role: 'user',
-                content: text
+                content: text,
+                time: getCurrentTimeStr()
             });
             appendAiMessageToUI({
                 role: 'ai',
-                content: '⚠️ 您尚未配置 **DeepSeek API Key**。\n请先点击右上角的 **【⚙️ 设置】** 图标输入并保存您的 API Key 即可畅享 AI 交互！'
+                content: '⚠️ 您尚未配置 **DeepSeek API Key**。\n请先点击右上角的 **【⚙️ 设置】** 图标输入并保存您的 API Key 即可畅享 AI 交互！',
+                time: getCurrentTimeStr()
             });
             aiChatInput.value = '';
             if (aiSettingsDrawer) aiSettingsDrawer.style.display = 'block';
             return;
         }
 
+        const currentTime = getCurrentTimeStr();
+
+        // 自动重命名会话标题（若仍为“新对话”，则使用首问作为标题）
+        if (session.title === '新对话') {
+            session.title = text.length > 18 ? text.slice(0, 18) + '...' : text;
+            if (chatSessionTitle) chatSessionTitle.textContent = session.title;
+        }
+
+        // 添加用户消息并持久化
+        session.messages.push({
+            role: 'user',
+            content: text,
+            time: currentTime
+        });
+        session.updatedAt = Date.now();
+        saveAiSessions();
+
         // 渲染用户输入气泡
         appendAiMessageToUI({
             role: 'user',
-            content: text
+            content: text,
+            time: currentTime
         });
 
-        // 记入上下文
-        chatHistory.push({ role: 'user', content: text });
         aiChatInput.value = '';
 
         // 渲染 loading 状态
@@ -2759,12 +3418,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const selectedModel = localStorage.getItem(STORAGE_KEY_MODEL) || 'deepseek-chat';
 
+        // 提取发送给后端的上下文
+        const messagesForApi = session.messages
+            .filter(m => m.role === 'user' || m.role === 'ai' || m.role === 'assistant')
+            .map(m => ({
+                role: m.role === 'ai' ? 'assistant' : m.role,
+                content: m.content
+            }));
+
         try {
             const res = await fetch(apiUrl('/api/ai/chat'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    messages: chatHistory,
+                    messages: messagesForApi,
                     api_key: apiKey,
                     model: selectedModel
                 })
@@ -2776,13 +3443,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 loadingRow.parentNode.removeChild(loadingRow);
             }
 
+            const replyTime = getCurrentTimeStr();
+
             if (resJson.success) {
                 appendAiMessageToUI({
                     role: 'ai',
                     content: resJson.reply,
-                    toolHistory: resJson.tool_history || []
+                    toolHistory: resJson.tool_history || [],
+                    time: replyTime
                 });
-                chatHistory.push({ role: 'assistant', content: resJson.reply });
+
+                session.messages.push({
+                    role: 'ai',
+                    content: resJson.reply,
+                    toolHistory: resJson.tool_history || [],
+                    time: replyTime
+                });
+                session.updatedAt = Date.now();
+                saveAiSessions();
+                renderSessionList();
 
                 // 如果 Agent 刚才执行了批量完成或修改等操作，自动触发界面刷新
                 if (resJson.tool_history && resJson.tool_history.some(th => ['batch_finish_my_tasks', 'batch_update_task_name'].includes(th.tool_name))) {
@@ -2791,8 +3470,19 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 appendAiMessageToUI({
                     role: 'ai',
-                    content: '⚠️ ' + (resJson.reply || resJson.message || 'AI 服务请求异常')
+                    content: '⚠️ ' + (resJson.reply || resJson.message || 'AI 服务请求异常'),
+                    time: replyTime
                 });
+                session.messages.push({
+                    role: 'ai',
+                    content: '⚠️ ' + (resJson.reply || resJson.message || 'AI 服务请求异常'),
+                    toolHistory: [],
+                    time: replyTime
+                });
+                session.updatedAt = Date.now();
+                saveAiSessions();
+                renderSessionList();
+
                 if (resJson.error_type === 'NO_API_KEY') {
                     if (aiSettingsDrawer) aiSettingsDrawer.style.display = 'block';
                 }
@@ -2803,7 +3493,8 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             appendAiMessageToUI({
                 role: 'ai',
-                content: `⚠️ 请求异常: ${e}，请检查网络连接或后端服务状态。`
+                content: `⚠️ 请求异常: ${e}，请检查网络连接或后端服务状态。`,
+                time: getCurrentTimeStr()
             });
         } finally {
             isAiGenerating = false;
@@ -2824,6 +3515,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     }
+
+    // 初始化加载 AI 对话多会话
+    initAiSessions();
 
     // 首次进入自动加载
     initFilterUserSelect();

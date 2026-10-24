@@ -121,6 +121,16 @@ class ZentaoClient:
 
     def get_my_tasks(self, view_type="assignedTo", fetch_all=True):
         """获取我的任务列表 (assignedTo, openedBy, finishedBy, closedBy, all)"""
+        # 禅道原生接口并不支持 my-task-all，当请求 all 时合并全部4个维度的关联任务
+        if view_type == 'all':
+            task_dict = {}
+            for vt in ['finishedBy', 'assignedTo', 'openedBy', 'closedBy']:
+                for t in self.get_my_tasks(view_type=vt, fetch_all=fetch_all):
+                    tid = str(t.get('id', ''))
+                    if tid and tid not in task_dict:
+                        task_dict[tid] = t
+            return list(task_dict.values())
+
         url = f"{self.base_url}/my-task-{view_type}-id_desc-0-1000-1.json"
         res = self._req('GET', url, timeout=15)
         data = self._parse_data(res)
@@ -146,6 +156,13 @@ class ZentaoClient:
                     if isinstance(p_users, dict):
                         users.update(p_users)
                 tasks = all_tasks
+
+        # 按 task id 去重
+        task_dict = {}
+        for t in tasks:
+            if isinstance(t, dict) and t.get('id'):
+                task_dict[str(t['id'])] = t
+        tasks = list(task_dict.values())
 
         # 补全真实姓名显示
         for t in tasks:
@@ -219,16 +236,14 @@ class ZentaoClient:
             print(f"Warning: Cannot resolve UID for user account '{account}'")
             return []
 
-        # 禅道原生 user-task 支持 assignedTo, finishedBy, openedBy, closedBy, canceledBy
-        # 若用户选择 'all'，合并抓取 assignedTo 与 finishedBy，并按 task id 去重
+        # 禅道原生 user-task 不直接支持 'all'，当用户选择 'all' 时，合并抓取全部4个维度的关联任务并按 task id 去重
         if view_type == 'all':
-            tasks_assigned = self._fetch_user_tasks_by_type(uid, 'assignedTo', fetch_all)
-            tasks_finished = self._fetch_user_tasks_by_type(uid, 'finishedBy', fetch_all)
             task_dict = {}
-            for t in tasks_assigned + tasks_finished:
-                tid = t.get('id')
-                if tid and tid not in task_dict:
-                    task_dict[tid] = t
+            for vt in ['finishedBy', 'assignedTo', 'openedBy', 'closedBy']:
+                for t in self._fetch_user_tasks_by_type(uid, vt, fetch_all):
+                    tid = str(t.get('id', ''))
+                    if tid and tid not in task_dict:
+                        task_dict[tid] = t
             return list(task_dict.values())
         else:
             return self._fetch_user_tasks_by_type(uid, view_type, fetch_all)
@@ -664,11 +679,18 @@ class ZentaoClient:
         final_comment = custom_comment
 
         if target_task_ids:
+            target_ids_set = {str(tid) for tid in target_task_ids}
+            my_tasks = self.get_my_tasks(view_type="assignedTo", fetch_all=True)
+            tasks_map = {str(t.get('id')): t for t in my_tasks}
             tasks_to_process = []
             for tid in target_task_ids:
-                t = self.get_task_detail(tid)
-                if t:
-                    tasks_to_process.append(t)
+                s_tid = str(tid)
+                if s_tid in tasks_map:
+                    tasks_to_process.append(tasks_map[s_tid])
+                else:
+                    t = self.get_task_detail(s_tid)
+                    if t:
+                        tasks_to_process.append(t)
         else:
             my_tasks = self.get_my_tasks(view_type="assignedTo", fetch_all=True)
             tasks_to_process = [t for t in my_tasks if t.get('status') in ['wait', 'doing', 'pause']]
