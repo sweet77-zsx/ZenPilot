@@ -7,15 +7,17 @@
 import os
 import sys
 import uuid
+import io
 import json
 import time
 import threading
-from datetime import timedelta
+from datetime import timedelta, datetime
 import urllib.parse
-from flask import Flask, render_template, request, jsonify, session, send_file, Response, stream_with_context
+from flask import Flask, render_template, request, jsonify, session, send_file, send_from_directory, Response, stream_with_context
 from zentao_client import ZentaoClient
 from weekly_report import generate_weekly_report_data, export_weekly_report_excel
 from ai_agent import chat_with_deepseek_agent, DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_DEEPSEEK_MODEL
+from ai_document import DOCS_DIR, markdown_to_docx, sanitize_filename
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = os.environ.get('SECRET_KEY', 'zentao-studio-multiuser-isolated-secret-2026')
@@ -640,6 +642,73 @@ def api_ai_test_key():
             return jsonify({"success": False, "message": f"Key 验证失败 (状态码 {resp.status_code}): {resp.text}"}), 400
     except Exception as e:
         return jsonify({"success": False, "message": f"连接 DeepSeek 服务超时或异常: {str(e)}"}), 500
+
+
+@app.route('/api/ai/download-doc/<filename>', methods=['GET'])
+def api_ai_download_doc(filename):
+    """
+    下载由 AI 生成并保存在本地的文档文件
+    """
+    safe_filename = os.path.basename(filename)
+    filepath = os.path.join(DOCS_DIR, safe_filename)
+    if not os.path.exists(filepath):
+        return jsonify({"success": False, "message": "请求的文档不存在或已被清理"}), 404
+
+    encoded_name = urllib.parse.quote(safe_filename.encode('utf-8'))
+    response = send_from_directory(
+        DOCS_DIR,
+        safe_filename,
+        as_attachment=True,
+        download_name=safe_filename
+    )
+    response.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{encoded_name}"
+    return response
+
+
+@app.route('/api/ai/export-content', methods=['POST'])
+def api_ai_export_content():
+    """
+    直接将传入的 Markdown 内容实时转换并下载为 Word (.docx) 或 Markdown (.md)
+    """
+    data = request.get_json() or {}
+    title = (data.get('title') or '小禅AI生成文档').strip()
+    content = data.get('content') or ''
+    doc_format = (data.get('format') or 'docx').lower()
+
+    if not content:
+        return jsonify({"success": False, "message": "导出的文档内容不能为空"}), 400
+
+    client, _ = get_client()
+    author = getattr(client, 'realname', '') or getattr(client, 'account', '') or "小禅 AI 智囊"
+
+    safe_title = sanitize_filename(title)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+
+    if doc_format == 'docx':
+        download_name = f"{safe_title}_{timestamp}.docx"
+        stream = markdown_to_docx(title, content, author=author)
+        encoded_name = urllib.parse.quote(download_name.encode('utf-8'))
+        response = send_file(
+            stream,
+            as_attachment=True,
+            download_name=download_name,
+            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+        response.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{encoded_name}"
+        return response
+    else:
+        download_name = f"{safe_title}_{timestamp}.md"
+        encoded_name = urllib.parse.quote(download_name.encode('utf-8'))
+        md_text = f"# {title}\n\n*作者: {author} | 导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n---\n\n{content}"
+        bio = io.BytesIO(md_text.encode('utf-8'))
+        response = send_file(
+            bio,
+            as_attachment=True,
+            download_name=download_name,
+            mimetype="text/markdown; charset=utf-8"
+        )
+        response.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{encoded_name}"
+        return response
 
 
 if __name__ == '__main__':

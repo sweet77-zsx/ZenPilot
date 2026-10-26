@@ -10,6 +10,7 @@ import json
 import requests
 from datetime import datetime
 from weekly_report import generate_weekly_report_data
+from ai_document import save_generated_doc
 
 # 默认 DeepSeek 基础地址与模型
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -157,6 +158,32 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "generate_downloadable_document",
+            "description": "将用户需要的内容、周报、任务总结、需求或技术方案生成排版精美的结构化文档文件（支持 Word .docx 与 Markdown .md），并在浏览器中生成直接下载链接。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "文档的标题，例如：'王淋淼_本周研发工作周报'、'禅道待办任务梳理与复盘总结'。"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "文档正文内容，支持完整的 Markdown 格式（可包含大标题#、二级标题##、列表、表格、加粗、引用与分析说明等）。"
+                    },
+                    "doc_type": {
+                        "type": "string",
+                        "enum": ["docx", "md"],
+                        "description": "生成的文档格式类型，可选 'docx'（推荐，生成标准Word文档）或 'md'（Markdown纯文本），默认为 'docx'。"
+                    }
+                },
+                "required": ["title", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_current_user_status",
             "description": "获取当前禅道登录人的账号信息、真实姓名、当前系统时间以及当前禅道连接状态。",
             "parameters": {
@@ -178,7 +205,16 @@ def execute_agent_tool(tool_name, arguments, client):
     :return: dict 执行结果
     """
     if not client:
-        return {"error": "当前未登录禅道账号，无法执行此操作。请先在页面登录禅道。"}
+        if tool_name == "get_current_user_status":
+            return {
+                "logged_in": False,
+                "account": "",
+                "realname": "",
+                "current_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "zentao_url": ""
+            }
+        elif tool_name != "generate_downloadable_document":
+            return {"error": "当前未登录禅道账号，无法执行此禅道系统操作。请先在页面登录禅道。"}
 
     try:
         if tool_name == "get_current_user_status":
@@ -333,6 +369,26 @@ def execute_agent_tool(tool_name, arguments, client):
                 ]
             }
 
+        elif tool_name == "generate_downloadable_document":
+            title = str(arguments.get("title") or "小禅AI生成文档").strip()
+            content = str(arguments.get("content") or "").strip()
+            doc_type = str(arguments.get("doc_type") or "docx").strip().lower()
+            author = getattr(client, 'realname', '') or getattr(client, 'account', '') or "小禅 AI 智囊"
+
+            if not content:
+                return {"error": "文档正文内容不能为空"}
+
+            doc_info = save_generated_doc(title=title, content=content, doc_type=doc_type, author=author)
+            return {
+                "success": True,
+                "message": f"文档已成功生成！文件格式：{doc_info['doc_type'].upper()}，大小：{doc_info['file_size']}",
+                "download_url": doc_info["download_url"],
+                "filename": doc_info["filename"],
+                "title": doc_info["title"],
+                "file_size": doc_info["file_size"],
+                "doc_type": doc_info["doc_type"]
+            }
+
         else:
             return {"error": f"未知的工具名称: {tool_name}"}
 
@@ -379,6 +435,9 @@ def chat_with_deepseek_agent(messages, client, api_key=None, base_url=None, mode
 3. 如果操作涉及修改任务或批量完成任务：在执行完成后，请用清晰、条理分明的 Markdown 格式向用户汇报成功、跳过与失败的数量及具体明细。
 4. 遇到用户日常闲聊时，保持风趣、可爱、温暖的语气，并在合适时机主动提示用户“需要我帮您查查今天的待办任务吗？”
 5. 每次回复时排版要美观、结构分明，善用 Emoji、列表和粗体，必要时使用表格展示数据。
+6. 你具备【生成可直接下载的文档文件】（Word .docx 或 Markdown .md）的能力！当用户要求“生成文档”、“导出周报文档”、“下载任务总结/技术方案”或希望获得文件时：
+   - 请主动调用 `generate_downloadable_document` 工具，传入规范完整的标题 `title`、经过条理化美观排版的正文 `content`（支持完整的 Markdown，包含各级标题#、列表、表格、加粗与总结说明）以及目标格式 `doc_type`（推荐 'docx'）；
+   - 工具执行成功后，请在最终回复中告知用户已生成完毕，并附带下载链接，格式为：`[📄 点击直接下载文档：{{title}}]({{download_url}})`。
 """
 
     # 规范化消息列表，确保首条是 system prompt

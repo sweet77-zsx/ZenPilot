@@ -2195,7 +2195,8 @@ input::-ms-clear {
     -webkit-user-select: none;
 }
 
-.btn-msg-copy {
+.btn-msg-copy,
+.btn-msg-export {
     background: transparent;
     border: none;
     color: #94a3b8;
@@ -2208,29 +2209,34 @@ input::-ms-clear {
     align-items: center;
     gap: 3px;
     line-height: 1.2;
-    opacity: 0.6;
+    opacity: 0.65;
     user-select: none;
 }
 
-.chat-msg-row:hover .btn-msg-copy {
+.chat-msg-row:hover .btn-msg-copy,
+.chat-msg-row:hover .btn-msg-export {
     opacity: 1;
 }
 
-.btn-msg-copy:hover {
+.btn-msg-copy:hover,
+.btn-msg-export:hover {
     color: #2563eb;
     background: #eff6ff;
 }
 
-.chat-msg-row.user .btn-msg-copy {
+.chat-msg-row.user .btn-msg-copy,
+.chat-msg-row.user .btn-msg-export {
     color: rgba(255, 255, 255, 0.7);
 }
 
-.chat-msg-row.user .btn-msg-copy:hover {
+.chat-msg-row.user .btn-msg-copy:hover,
+.chat-msg-row.user .btn-msg-export:hover {
     color: #ffffff;
     background: rgba(255, 255, 255, 0.2);
 }
 
-.btn-msg-copy.is-copied {
+.btn-msg-copy.is-copied,
+.btn-msg-export.is-copied {
     color: #10b981 !important;
     font-weight: 600;
 }
@@ -2245,6 +2251,95 @@ input::-ms-clear {
 
 .chat-msg-row.user .chat-msg-time {
     color: rgba(255, 255, 255, 0.7);
+}
+
+/* AI 生成的文档下载卡片 (Document Download Card) */
+.ai-doc-card {
+    background: linear-gradient(135deg, #f0fdf4 0%, #eff6ff 100%);
+    border: 1px solid #bfdbfe;
+    border-radius: 12px;
+    padding: 12px 14px;
+    margin: 10px 0 6px 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    box-shadow: 0 2px 6px rgba(37, 99, 235, 0.06);
+    transition: all 0.2s ease;
+    user-select: none;
+}
+
+.ai-doc-card:hover {
+    border-color: #60a5fa;
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.12);
+    transform: translateY(-1px);
+}
+
+.ai-doc-card-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+
+.ai-doc-card-icon {
+    font-size: 26px;
+    flex-shrink: 0;
+    line-height: 1;
+}
+
+.ai-doc-card-meta {
+    min-width: 0;
+}
+
+.ai-doc-card-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #1e3a8a;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-bottom: 2px;
+}
+
+.ai-doc-card-sub {
+    font-size: 11px;
+    color: #64748b;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.ai-doc-card-tag {
+    background: #dbeafe;
+    color: #1d4ed8;
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-weight: 600;
+}
+
+.ai-doc-download-btn {
+    background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+    color: #ffffff !important;
+    text-decoration: none !important;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    box-shadow: 0 2px 5px rgba(37, 99, 235, 0.25);
+    transition: all 0.15s ease;
+    cursor: pointer;
+}
+
+.ai-doc-download-btn:hover {
+    background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(37, 99, 235, 0.35);
 }
 
 /* Agent 工具调用徽章 (Tool Execution Card) */

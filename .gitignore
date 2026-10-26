@@ -47,7 +47,8 @@ zentao_config.ini
 *.xlsx
 *.xls
 *.csv
+# Generated docs
+generated_docs/
 
-# OS generated files
 .DS_Store
 Thumbs.db

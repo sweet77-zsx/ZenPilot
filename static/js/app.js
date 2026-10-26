@@ -2815,7 +2815,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // 7. 渲染轻量级 Markdown (加粗、换行、列表、代码、表格)
+    // 7. 渲染轻量级 Markdown (加粗、换行、标题、列表、代码、表格及文档下载卡片)
     function renderMarkdownToHtml(markdown) {
         if (!markdown) return '';
         let text = escapeHtml(markdown);
@@ -2865,15 +2865,24 @@ document.addEventListener('DOMContentLoaded', () => {
             resultLines.push(tableHtml);
         }
 
-        // 处理无序列表与段落
+        // 处理标题、无序/有序列表与普通段落
         let finalHtml = '';
         let inList = false;
         for (let l of resultLines) {
-            if (l.startsWith('&lt;table') || l.startsWith('&lt;pre')) {
+            if (l.startsWith('&lt;table') || l.startsWith('&lt;pre') || l.startsWith('<table') || l.startsWith('<pre')) {
                 finalHtml += l;
                 continue;
             }
-            if (/^[-*]\s+/.test(l)) {
+            if (/^###\s+/.test(l)) {
+                if (inList) { finalHtml += '</ul>'; inList = false; }
+                finalHtml += `<h4 style="margin: 8px 0 4px; font-size: 13px; font-weight: 700; color: #1e293b;">${l.replace(/^###\s+/, '')}</h4>`;
+            } else if (/^##\s+/.test(l)) {
+                if (inList) { finalHtml += '</ul>'; inList = false; }
+                finalHtml += `<h3 style="margin: 10px 0 5px; font-size: 14px; font-weight: 700; color: #1e40af;">${l.replace(/^##\s+/, '')}</h3>`;
+            } else if (/^#\s+/.test(l)) {
+                if (inList) { finalHtml += '</ul>'; inList = false; }
+                finalHtml += `<h2 style="margin: 12px 0 6px; font-size: 15px; font-weight: 700; color: #1e3a8a;">${l.replace(/^#\s+/, '')}</h2>`;
+            } else if (/^[-*]\s+/.test(l)) {
                 if (!inList) {
                     finalHtml += '<ul>';
                     inList = true;
@@ -2897,6 +2906,33 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (inList) finalHtml += '</ul>';
 
+        // 识别 Markdown 链接语法 [label](url)
+        finalHtml = finalHtml.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, href) => {
+            // 如果指向文档下载接口 /api/ai/download-doc/，自动升格为精美文档下载卡片
+            if (href.includes('/api/ai/download-doc/')) {
+                const isDocx = href.toLowerCase().endsWith('.docx');
+                const icon = isDocx ? '📄' : '📝';
+                const typeTag = isDocx ? 'Word 文档 (.docx)' : 'Markdown 文档 (.md)';
+                const cleanLabel = label.replace(/^[📄📝⬇️\s]+/, '').replace(/^点击直接下载文档[：:]\s*/, '').trim() || '小禅AI生成文档';
+                return `
+                    <div class="ai-doc-card">
+                        <div class="ai-doc-card-info">
+                            <span class="ai-doc-card-icon">${icon}</span>
+                            <div class="ai-doc-card-meta">
+                                <div class="ai-doc-card-title">${escapeHtml(cleanLabel)}</div>
+                                <div class="ai-doc-card-sub">
+                                    <span class="ai-doc-card-tag">${typeTag}</span>
+                                    <span>AI智能生成 · 直接下载</span>
+                                </div>
+                            </div>
+                        </div>
+                        <a href="${href}" class="ai-doc-download-btn" download target="_blank">⬇️ 立即下载</a>
+                    </div>
+                `;
+            }
+            return `<a href="${href}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${label}</a>`;
+        });
+
         return finalHtml || text.replace(/\n/g, '<br>');
     }
 
@@ -2904,9 +2940,9 @@ document.addEventListener('DOMContentLoaded', () => {
     function getAiWelcomeText() {
         const name = currentUserRealname || currentAccount;
         if (name) {
-            return `您好，**${escapeHtml(name)}**！我是您的禅道桌面伴侣 **「小禅」** 🤖。\n\n我可以帮您通过 DeepSeek 模型与禅道系统实时协同：\n- 🔍 **查询名下待办任务与工时**\n- ⚡ **一键批量将待办切为进行中并点击完成**\n- 📝 **批量修改任务名称与描述**\n- 📊 **汇总并生成符合标准格式的工作周报**\n- 📁 **检索禅道里的所有项目与详情**\n\n有什么我可以协助您的吗？您可以在下方直接提问，或点击预设胶囊快捷体验~`;
+            return `您好，**${escapeHtml(name)}**！我是您的禅道桌面伴侣 **「小禅」** 🤖。\n\n我可以帮您通过 DeepSeek 模型与禅道系统实时协同：\n- 🔍 **查询名下待办任务与工时**\n- ⚡ **一键批量将待办切为进行中并点击完成**\n- 📝 **批量修改任务名称与描述**\n- 📊 **汇总并生成符合标准格式的工作周报**\n- 📄 **智能生成专业 Word/MD 文档并支持直接浏览器下载**\n- 📁 **检索禅道里的所有项目与详情**\n\n有什么我可以协助您的吗？您可以在下方直接提问，或点击预设胶囊快捷体验~`;
         }
-        return `您好！我是您的禅道桌面伴侣 **「小禅」** 🤖。\n\n*（当前处于未登录状态，登录后可为您专属查询名下待办、一键批量报工与定制周报）*\n\n您可以点击右上角 **【🔑 登录禅道】** 完成登录。若已配置 DeepSeek API Key，您也可以在此咨询任何关于禅道操作的问题！`;
+        return `您好！我是您的禅道桌面伴侣 **「小禅」** 🤖。\n\n*（当前处于未登录状态，登录后可为您专属查询名下待办、一键批量报工与定制周报）*\n\n您可以点击右上角 **【🔑 登录禅道】** 完成登录。若已配置 DeepSeek API Key，您也可以在此咨询任何关于禅道操作的问题，或让我为您撰写并导出文档！`;
     }
 
     function getCurrentTimeStr() {
@@ -3240,6 +3276,54 @@ document.addEventListener('DOMContentLoaded', () => {
         if (aiHistoryDrawer) aiHistoryDrawer.style.display = 'none';
     }
 
+    // 导出单条消息或内容为文档文件并直接调起浏览器原生下载
+    async function exportMessageAsDocument(title, content, format = 'docx') {
+        if (!content) {
+            alert('暂无可导出的内容');
+            return;
+        }
+        showLoading(`正在生成 ${format.toUpperCase()} 文档并准备下载...`);
+        try {
+            const res = await fetch(apiUrl('/api/ai/export-content'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    title: title || '小禅AI生成文档',
+                    content: content,
+                    format: format
+                })
+            });
+            hideLoading();
+            if (!res.ok) {
+                const errJson = await res.json().catch(() => ({}));
+                alert('导出失败: ' + (errJson.message || res.statusText));
+                return;
+            }
+            let filename = `小禅AI文档.${format}`;
+            const disposition = res.headers.get('Content-Disposition');
+            if (disposition && disposition.includes('filename*=')) {
+                const match = disposition.match(/filename\*=UTF-8''([^;]+)/);
+                if (match && match[1]) filename = decodeURIComponent(match[1]);
+            } else if (disposition && disposition.includes('filename=')) {
+                const match = disposition.match(/filename="?([^";]+)"?/);
+                if (match && match[1]) filename = match[1];
+            }
+
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+        } catch (e) {
+            hideLoading();
+            alert('导出请求异常: ' + e);
+        }
+    }
+
     // 9. 添加消息气泡到 UI
     function appendAiMessageToUI({ role, content, toolHistory, time, isTemp }) {
         if (!chatMessagesContainer) return null;
@@ -3267,6 +3351,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     'batch_finish_my_tasks': '一键批量完成待办任务',
                     'batch_update_task_name': '批量修改任务名称',
                     'generate_weekly_report': '生成个人工作周报数据',
+                    'generate_downloadable_document': '生成可下载文档',
                     'get_current_user_status': '获取登录状态与用户信息'
                 };
                 const displayToolName = toolNameMap[th.tool_name] || th.tool_name;
@@ -3316,6 +3401,35 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             };
             footerDiv.appendChild(copyBtn);
+
+            // 仅对 AI 生成的回答提供导出为 Word 和 Markdown 按钮
+            if (role === 'ai') {
+                const exportWordBtn = document.createElement('button');
+                exportWordBtn.type = 'button';
+                exportWordBtn.className = 'btn-msg-export';
+                exportWordBtn.title = '将本条内容导出为 Word (.docx) 文档并下载';
+                exportWordBtn.innerHTML = '📄 导出Word';
+                exportWordBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    const active = getActiveSession();
+                    const docTitle = active ? active.title : '小禅AI生成文档';
+                    exportMessageAsDocument(docTitle, content, 'docx');
+                };
+                footerDiv.appendChild(exportWordBtn);
+
+                const exportMdBtn = document.createElement('button');
+                exportMdBtn.type = 'button';
+                exportMdBtn.className = 'btn-msg-export';
+                exportMdBtn.title = '将本条内容导出为 Markdown (.md) 文档并下载';
+                exportMdBtn.innerHTML = '📝 导出MD';
+                exportMdBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    const active = getActiveSession();
+                    const docTitle = active ? active.title : '小禅AI生成文档';
+                    exportMessageAsDocument(docTitle, content, 'md');
+                };
+                footerDiv.appendChild(exportMdBtn);
+            }
 
             if (time) {
                 const timeDiv = document.createElement('div');
