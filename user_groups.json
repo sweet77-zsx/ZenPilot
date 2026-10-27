@@ -1,0 +1,36 @@
+[
+  {
+    "id": "grp_default_app",
+    "name": "应用组",
+    "members": [
+      {
+        "account": "wanglinmiao",
+        "realname": "王淋淼"
+      },
+      {
+        "account": "LvZizheng",
+        "realname": "吕自政"
+      },
+      {
+        "account": "ZengZiqiang",
+        "realname": "曾自强"
+      },
+      {
+        "account": "Luoxin",
+        "realname": "罗鑫"
+      },
+      {
+        "account": "Dujiantao",
+        "realname": "杜健涛"
+      },
+      {
+        "account": "huangweiwei",
+        "realname": "黄威威"
+      },
+      {
+        "account": "HaoYinhang",
+        "realname": "郝银行"
+      }
+    ]
+  }
+]

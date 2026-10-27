@@ -584,85 +584,183 @@ class ZentaoClient:
 
         return res.status_code == 200, "提交完成"
 
+    def _get_task_edit_form_data(self, task_id):
+        """
+        从任务编辑页面 HTML 动态解析提取全量真实表单字段。
+        完美自适应保留已关闭/已完成等各种特殊状态任务的闭环上下文
+        （如 lastEditedDate, closedBy, closedDate, closedReason, finishedBy, finishedDate, story 等）。
+        """
+        url = f"{self.base_url}/task-edit-{task_id}.html"
+        try:
+            resp = self._req('GET', url, timeout=10)
+            if resp.status_code != 200 or not resp.text:
+                return None
+
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                form = soup.find('form')
+                if not form:
+                    return None
+
+                form_data = {}
+                for el in form.find_all(['input', 'select', 'textarea']):
+                    name = el.get('name')
+                    if not name or el.has_attr('disabled'):
+                        continue
+                    
+                    if el.name == 'select':
+                        selected_opts = el.find_all('option', selected=True)
+                        if el.has_attr('multiple') or name.endswith('[]'):
+                            val = [opt.get('value') for opt in selected_opts if opt.get('value')]
+                        else:
+                            val = selected_opts[0].get('value') if selected_opts else ''
+                    elif el.name == 'textarea':
+                        val = el.text or ''
+                    else:
+                        val = el.get('value', '')
+
+                    if name not in form_data:
+                        form_data[name] = val
+                return form_data
+            except Exception:
+                return None
+        except Exception:
+            return None
+
     def edit_task_fields(self, task_id, update_fields, comment=""):
-        """编辑任务的通用字段 (完整传递已有字段，严防工时校验缺失)"""
+        """
+        通用任务字段编辑（严格字段保护与防误修改增强版）：
+        1. 获取任务当前数据库真实详情 (Ground Truth)；
+        2. 解析编辑页全量表单以保留特殊状态下底层必填的隐藏上下文 (如 lastEditedDate, tokens 等)；
+        3. 【核心安全防护】：对于任何未在 update_fields 中声明的字段，若表单解析出空值或与真实详情不一致，
+           必须强制回退为权威原值（如 finishedBy, assignedTo, mailto 等），严防篡改清空原有记录！
+        4. 仅对 update_fields 中明确指定的字段赋予新值；
+        5. 双通道提交 (.json 接口优先 + 原生 HTML 表单通道兜底)；
+        6. 后置落盘比对，确保修改真正生效。
+        """
         task = self.get_task_detail(task_id)
         if not task:
             return False, f"未找到任务 #{task_id}"
 
-        edit_url = f"{self.base_url}/task-edit-{task_id}.json"
-        payload = {
-            "name": task.get('name', ''),
-            "desc": task.get('desc', ''),
-            "type": task.get('type', 'devel'),
-            "module": str(task.get('module', '0') or '0'),
-            "pri": task.get('pri', '3'),
-            "estimate": str(task.get('estimate', '0') or '0'),
-            "status": task.get('status', 'wait'),
-            "assignedTo": task.get('assignedTo', ''),
-            "consumed": str(task.get('consumed', '0') or '0'),
-            "left": str(task.get('left', '0') or '0'),
-            "deadline": task.get('deadline', ''),
-            "estStarted": task.get('estStarted', ''),
-            "realStarted": task.get('realStarted', ''),
-            "finishedDate": task.get('finishedDate', ''),
-            "closedDate": task.get('closedDate', ''),
-            "closedReason": task.get('closedReason', ''),
-            "lastEditedDate": task.get('lastEditedDate', ''),
-            "project": str(task.get('project', '0')),
-            "execution": str(task.get('execution', '0') or '0'),
-            "comment": str(comment or '').strip()
-        }
+        # 1. 尝试动态抓取页面真实表单项作为基础上下文
+        form_data = self._get_task_edit_form_data(task_id)
+        payload = dict(form_data) if form_data else {}
 
-        # 如果修改项目，模块重置为 0，所属执行重置为 0 避免跨项目引发校验不匹配
-        if "project" in update_fields:
-            payload["module"] = "0"
-            payload["execution"] = "0"
+        # 2. 权威原值守护列表：这些业务字段若未在 update_fields 中指定，严禁被表单空值清空
+        critical_fields = [
+            'finishedBy', 'finishedDate',
+            'assignedTo', 'status',
+            'closedBy', 'closedDate', 'closedReason',
+            'canceledBy', 'canceledDate',
+            'pri', 'estimate', 'consumed', 'left',
+            'estStarted', 'realStarted', 'deadline',
+            'project', 'execution', 'module', 'type', 'story'
+        ]
 
-        # 覆盖待修改的字段
+        for cf in critical_fields:
+            if cf not in update_fields:
+                task_val = task.get(cf)
+                # 若权威原任务有值，但表单中缺失或被解析为 ''，强制复原为原值
+                if task_val not in (None, ''):
+                    payload[cf] = str(task_val)
+
+        # 3. 对抄送给 (mailto) 的保护：
+        # 若未明确修改抄送人，严禁在 POST 中携带 mailto/mailto[]，防止被表单解析值或标量覆盖误清空；
+        # 禅道在 POST 中未包含 mailto 时会完整保留原有全部抄送人列表。
+        if 'mailto' not in update_fields and 'mailto[]' not in update_fields:
+            payload.pop('mailto', None)
+            payload.pop('mailto[]', None)
+        else:
+            target_mailto = update_fields.get('mailto[]', update_fields.get('mailto'))
+            if isinstance(target_mailto, str):
+                target_mailto = [m.strip() for m in target_mailto.replace(';', ',').split(',') if m.strip()]
+            payload.pop('mailto', None)
+            payload['mailto[]'] = target_mailto or []
+
+        # 4. 基础字段保障：name 与 desc
+        # 任务名称 name 为禅道必填项，若未修改则保持原名；
+        # 任务描述 desc：若未明确在 update_fields 中指定修改描述，严禁在 POST 中回传 desc！
+        # 因为回传富文本描述会触发禅道富文本编辑器对图片标签等做格式转换，产生虚假的“修改了任务描述”历史记录。
+        if 'name' not in update_fields:
+            payload['name'] = str(task.get('name', payload.get('name', '')))
+
+        if 'desc' not in update_fields:
+            payload.pop('desc', None)
+            payload.pop('labels[]', None)
+            payload.pop('files[]', None)
+
+        # 5. 覆盖待修改的目标字段
         for k, v in update_fields.items():
-            payload[k] = str(v)
+            if k not in ('mailto', 'mailto[]'):
+                payload[k] = str(v)
 
-        res = self._req('POST', edit_url, data=payload, timeout=10)
+        if comment:
+            payload["comment"] = str(comment).strip()
+        else:
+            payload.pop("comment", None)
+
+        # 4. 双通道智能提交：优先提交到 .json，若未生效则 fallback 到 .html 表单
+        edit_json_url = f"{self.base_url}/task-edit-{task_id}.json"
+        res = self._req('POST', edit_json_url, data=payload, timeout=12)
         data = self._parse_data(res)
         locate_url = str(data.get('locate', '')) if isinstance(data, dict) else ''
 
-        # 1. 严格检查是否被禅道权限拦截 (user-deny)
+        # 权限拦截判断
         if "user-deny" in res.text or "user-deny" in locate_url:
-            status_tip = ""
-            if task.get('status') == 'closed':
-                status_tip = "（且该任务当前为【已关闭(closed)】归档状态）"
-            return False, f"禅道权限不足：当前账号【{self.account}】未被系统授予【编辑任务】(task-edit)权限{status_tip}，请联系项目经理或管理员授权处理"
+            status_tip = "（该任务当前为【已关闭(closed)】归档状态）" if task.get('status') == 'closed' else ""
+            return False, f"禅道权限不足：当前账号【{self.account}】未被系统授予【编辑任务】权限{status_tip}"
 
-        # 2. 准确判定业务执行结果
-        if isinstance(data, dict):
-            if data.get('result') == 'fail':
-                msg = data.get('message') or '修改被拒绝'
-                if isinstance(msg, dict):
-                    msg = "; ".join(f"{k}: {v}" for k, v in msg.items())
-                return False, str(msg)
+        # 业务报错提取 (如总计消耗校验等)
+        if isinstance(data, dict) and data.get('result') == 'fail':
+            msg = data.get('message') or '修改被拒绝'
+            if isinstance(msg, dict):
+                msg = "; ".join(f"{k}: {v}" for k, v in msg.items())
+            return False, str(msg)
 
-        # 3. 如果更新的是 project，做后置读取比对，验证禅道是否真正保存
+        # 5. 后置读取比对，验证是否真正成功落盘
+        latest_task = self.get_task_detail(task_id) or {}
+        check_passed = True
+        failed_reason = ""
+
         if "project" in update_fields:
-            latest_task = self.get_task_detail(task_id)
-            if str(latest_task.get('project')) == str(update_fields['project']):
-                return True, "项目修改成功"
-            else:
-                return False, f"禅道未保存项目变更(当前仍为项目#{latest_task.get('project')})"
-
-        # 4. 如果更新的是 name，做后置读取比对
+            if str(latest_task.get('project')) != str(update_fields['project']):
+                check_passed = False
+                failed_reason = f"禅道未保存项目变更(当前仍为项目#{latest_task.get('project')})"
+        if "assignedTo" in update_fields:
+            if str(latest_task.get('assignedTo')) != str(update_fields['assignedTo']):
+                check_passed = False
+                failed_reason = f"禅道未保存指派人变更(当前仍为{latest_task.get('assignedTo')})"
+        if "finishedBy" in update_fields:
+            if str(latest_task.get('finishedBy') or '').strip() != str(update_fields['finishedBy'] or '').strip():
+                check_passed = False
+                failed_reason = f"禅道未保存实际完成人变更(当前仍为{latest_task.get('finishedBy')})"
         if "name" in update_fields:
-            latest_task = self.get_task_detail(task_id)
-            if str(latest_task.get('name')) == str(update_fields['name']):
-                return True, "任务名称修改成功"
-            else:
-                return False, "禅道未保存任务名称"
+            if str(latest_task.get('name')) != str(update_fields['name']):
+                check_passed = False
+                failed_reason = "禅道未保存任务名称变更"
 
-        if locate_url and "user-deny" not in locate_url:
-            return True, "更新成功"
-        elif "fail" in res.text:
-            return False, res.text
-        return res.status_code == 200, "更新完成"
+        # 若 .json 接口未能成功落盘，启用 HTML 表单通道进行重试提交
+        if not check_passed:
+            edit_html_url = f"{self.base_url}/task-edit-{task_id}.html"
+            res_html = self.session.post(edit_html_url, data=payload, headers={'Referer': edit_html_url}, timeout=12)
+            if "user-deny" in res_html.text:
+                return False, f"禅道权限不足：当前账号【{self.account}】无权编辑此任务"
+            # 重新读取比对
+            latest_task = self.get_task_detail(task_id) or {}
+            check_passed = True
+            if "project" in update_fields and str(latest_task.get('project')) != str(update_fields['project']):
+                check_passed = False
+            if "assignedTo" in update_fields and str(latest_task.get('assignedTo')) != str(update_fields['assignedTo']):
+                check_passed = False
+            if "finishedBy" in update_fields and str(latest_task.get('finishedBy') or '').strip() != str(update_fields['finishedBy'] or '').strip():
+                check_passed = False
+            if "name" in update_fields and str(latest_task.get('name')) != str(update_fields['name']):
+                check_passed = False
+
+        if check_passed:
+            return True, "修改成功"
+        return False, failed_reason or "修改未生效，请检查任务状态与字段限制"
 
     def batch_auto_finish_my_tasks_stream(self, target_task_ids=None, interval_seconds=1.0, comment=""):
         """
@@ -867,7 +965,9 @@ class ZentaoClient:
                     elif name_mode == "suffix":
                         target_name = f"{t_name}{value}" if value else t_name
                     elif name_mode == "replace":
-                        target_name = t_name.replace(str(replace_from), str(value))
+                        from_kw = str(replace_from or '')
+                        to_kw = "" if value is None else str(value)
+                        target_name = t_name.replace(from_kw, to_kw) if from_kw else t_name
                     else:
                         target_name = str(value).strip()
 
@@ -913,6 +1013,14 @@ class ZentaoClient:
                     final_name = target_name
                 elif field == "assignedTo":
                     target_assigned = str(value or '').strip()
+                    if target_assigned and not target_assigned.isascii():
+                        try:
+                            for u in self.get_all_users():
+                                if u.get('realname') == target_assigned:
+                                    target_assigned = u.get('account')
+                                    break
+                        except Exception:
+                            pass
                     old_assigned = str(t.get('assignedTo') or '').strip()
                     if old_assigned == target_assigned:
                         results["unmodified"].append({"id": tid, "name": t_name, "reason": "指派人已是目标用户，未做修改"})
@@ -926,6 +1034,30 @@ class ZentaoClient:
                         }
                         continue
                     ok, msg = self.assign_task(tid, assigned_to=target_assigned, project_id=project_id, comment=actual_comment)
+                elif field == "finishedBy":
+                    target_finished = str(value or '').strip()
+                    # 若传入的是中文真实姓名，自动在用户列表中反查账号
+                    if target_finished and not target_finished.isascii():
+                        try:
+                            for u in self.get_all_users():
+                                if u.get('realname') == target_finished:
+                                    target_finished = u.get('account')
+                                    break
+                        except Exception:
+                            pass
+                    old_finished = str(t.get('finishedBy') or '').strip()
+                    if old_finished == target_finished:
+                        results["unmodified"].append({"id": tid, "name": t_name, "reason": "实际完成人已是目标用户，未做修改"})
+                        yield {
+                            "type": "progress",
+                            "current": cur_num,
+                            "total": total,
+                            "task": {"id": tid, "name": t_name},
+                            "status": "skipped",
+                            "message": f"任务#{tid} 实际完成人已是目标用户"
+                        }
+                        continue
+                    ok, msg = self.edit_task_fields(tid, {"finishedBy": target_finished}, comment=actual_comment)
                 elif field == "status" and value == "doing":
                     old_status = str(t.get('status') or '').strip()
                     if old_status == "doing":

@@ -6,11 +6,13 @@
 
 import os
 import sys
+import re
 import uuid
 import io
 import json
 import time
 import threading
+import concurrent.futures
 from datetime import timedelta, datetime
 import urllib.parse
 from flask import Flask, render_template, request, jsonify, session, send_file, send_from_directory, Response, stream_with_context
@@ -300,34 +302,98 @@ def api_query_tasks():
     target_account = (params.get('target_account') or '').strip()
     target_realname = (params.get('target_realname') or '').strip()
     project_id = params.get('project_id')
+    project_ids_raw = params.get('project_ids')
+    target_project_ids = set()
+    if isinstance(project_ids_raw, list):
+        for pid in project_ids_raw:
+            if str(pid).strip():
+                target_project_ids.add(str(pid).strip())
+    elif project_ids_raw:
+        for pid in str(project_ids_raw).split(','):
+            if pid.strip():
+                target_project_ids.add(pid.strip())
+    if project_id and str(project_id).strip():
+        target_project_ids.add(str(project_id).strip())
+
     execution_id = params.get('execution_id')
     status_filter = params.get('status') # wait, doing, done, closed 等
     year_filter = params.get('year') # 2026 等
     unassigned_only = params.get('unassigned_only', False)
     keyword = params.get('keyword', '').strip().lower()
 
-    # 确定查询的目标用户：默认当前登录用户
     current_acc = str(getattr(client, 'account', '') or '').strip()
-    effective_account = target_account if target_account else current_acc
-    effective_realname = target_realname
+    current_realname = str(getattr(client, 'realname', '') or current_acc).strip()
 
-    # 若未指定 target_realname，尝试从用户列表中查找
-    if not effective_realname:
-        if effective_account.lower() == current_acc.lower():
-            effective_realname = str(getattr(client, 'realname', '') or current_acc).strip()
+    # 支持目标用户多选
+    target_accounts_raw = params.get('target_accounts') or []
+    target_accounts = []
+    if isinstance(target_accounts_raw, list):
+        for acc in target_accounts_raw:
+            if str(acc).strip():
+                target_accounts.append(str(acc).strip())
+    elif target_accounts_raw:
+        for acc in str(target_accounts_raw).split(','):
+            if acc.strip():
+                target_accounts.append(acc.strip())
+
+    target_account = (params.get('target_account') or '').strip()
+    if not target_accounts:
+        if target_account:
+            target_accounts.append(target_account)
+        elif current_acc:
+            target_accounts.append(current_acc)
+
+    effective_account = target_accounts[0] if target_accounts else current_acc
+
+    # 建立多选用户的账号与真实姓名映射
+    account_to_realname = {}
+    for acc in target_accounts:
+        if acc.lower() == current_acc.lower():
+            account_to_realname[acc.lower()] = current_realname
         else:
-            try:
-                for u in client.get_all_users():
-                    if u.get('account', '').lower() == effective_account.lower():
-                        effective_realname = u.get('realname', '')
-                        break
-            except Exception:
-                pass
+            account_to_realname[acc.lower()] = ""
+
+    target_realnames_raw = params.get('target_realnames') or []
+    if isinstance(target_realnames_raw, list):
+        for idx, rname in enumerate(target_realnames_raw):
+            if idx < len(target_accounts) and rname:
+                account_to_realname[target_accounts[idx].lower()] = str(rname).strip()
+
+    # 若未全部解析出真实姓名，从用户列表补充
+    if any(not r for r in account_to_realname.values()):
+        try:
+            for u in client.get_all_users():
+                u_acc = str(u.get('account', '')).strip().lower()
+                if u_acc in account_to_realname and not account_to_realname[u_acc]:
+                    account_to_realname[u_acc] = str(u.get('realname', '')).strip()
+        except Exception:
+            pass
+
+    target_accounts_set = {acc.lower() for acc in target_accounts}
+    target_realnames_set = {r for r in account_to_realname.values() if r}
 
     try:
-        # 1. 抓取原始任务数据
-        if project_id:
-            tasks = client.get_project_tasks(int(project_id))
+        if target_accounts:
+            tasks = []
+            seen_raw_tids = set()
+
+            def fetch_single_user_tasks(acc):
+                try:
+                    return acc, client.get_user_tasks(account=acc, view_type=view_type, fetch_all=True)
+                except Exception as e:
+                    app.logger.warning(f"Failed to fetch tasks for user {acc}: {e}")
+                    return acc, []
+
+            workers = min(8, len(target_accounts))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                results = list(executor.map(fetch_single_user_tasks, target_accounts))
+
+            for acc, u_tasks in results:
+                for ut in u_tasks:
+                    ut_id = str(ut.get('id', '')).strip()
+                    if ut_id and ut_id not in seen_raw_tids:
+                        seen_raw_tids.add(ut_id)
+                        tasks.append(ut)
         elif execution_id:
             tasks = client.get_execution_tasks(int(execution_id))
         else:
@@ -338,14 +404,13 @@ def api_query_tasks():
             if not val and not realname_val:
                 return False
             # 1. 忽略大小写比对英文账号
-            if effective_account and val and str(val).strip().lower() == effective_account.lower():
+            if val and str(val).strip().lower() in target_accounts_set:
                 return True
             # 2. 比对中文真实姓名
-            if effective_realname:
-                if val and str(val).strip() == effective_realname:
-                    return True
-                if realname_val and str(realname_val).strip() == effective_realname:
-                    return True
+            if val and str(val).strip() in target_realnames_set:
+                return True
+            if realname_val and str(realname_val).strip() in target_realnames_set:
+                return True
             return False
 
         matched = []
@@ -355,27 +420,31 @@ def api_query_tasks():
             if tid and tid in seen_ids:
                 continue
 
-            # 任务归属范围过滤 (仅在按项目或执行全量查询时执行二次用户归属筛选；
-            # 若直接查指定用户的任务，服务端接口本身已经限定归属人，此处仅作为辅助校验并采用宽容匹配)
-            if project_id or execution_id:
-                if view_type == 'finishedBy' and not is_match_user(t.get('finishedBy'), t.get('finishedByRealname')):
-                    continue
-                elif view_type == 'assignedTo' and not is_match_user(t.get('assignedTo'), t.get('assignedToRealname')):
-                    continue
-                elif view_type == 'openedBy' and not is_match_user(t.get('openedBy'), t.get('openedByRealname')):
-                    continue
-                elif view_type == 'closedBy' and not is_match_user(t.get('closedBy'), t.get('closedByRealname')):
-                    continue
-                elif view_type == 'all' and not (
-                    is_match_user(t.get('assignedTo'), t.get('assignedToRealname')) or
-                    is_match_user(t.get('finishedBy'), t.get('finishedByRealname')) or
-                    is_match_user(t.get('openedBy'), t.get('openedByRealname')) or
-                    is_match_user(t.get('closedBy'), t.get('closedByRealname'))
-                ):
+            # 所属项目多选过滤
+            if target_project_ids:
+                p_val = str(t.get('project') or '').strip()
+                if p_val not in target_project_ids:
                     continue
 
+            # 任务归属范围过滤 (按指定用户进行过滤)
+            if view_type == 'finishedBy' and not is_match_user(t.get('finishedBy'), t.get('finishedByRealname')):
+                continue
+            elif view_type == 'assignedTo' and not is_match_user(t.get('assignedTo'), t.get('assignedToRealname')):
+                continue
+            elif view_type == 'openedBy' and not is_match_user(t.get('openedBy'), t.get('openedByRealname')):
+                continue
+            elif view_type == 'closedBy' and not is_match_user(t.get('closedBy'), t.get('closedByRealname')):
+                continue
+            elif view_type == 'all' and not (
+                is_match_user(t.get('assignedTo'), t.get('assignedToRealname')) or
+                is_match_user(t.get('finishedBy'), t.get('finishedByRealname')) or
+                is_match_user(t.get('openedBy'), t.get('openedByRealname')) or
+                is_match_user(t.get('closedBy'), t.get('closedByRealname'))
+            ):
+                continue
+
             # 状态过滤
-            if status_filter and t.get('status') != status_filter:
+            if status_filter and status_filter != 'all' and t.get('status') != status_filter:
                 continue
 
             # 年份过滤 (智能匹配任务的预计开始、创建日期或实际完成日期)
@@ -411,6 +480,146 @@ def api_query_tasks():
             "total": len(matched)
         })
     except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route('/api/project-tasks/query', methods=['POST'])
+def api_query_project_tasks():
+    """
+    独立功能模块：直接根据项目分类，查询所选项目底下的所有任务 (包含所有人员的全量任务)
+    """
+    client, err = get_client()
+    if err:
+        return jsonify({"success": False, "message": err}), 400
+
+    params = request.get_json() or {}
+    project_id = params.get('project_id')
+    project_ids_raw = params.get('project_ids')
+    target_project_ids = []
+    if isinstance(project_ids_raw, list):
+        for pid in project_ids_raw:
+            if str(pid).strip() and str(pid).strip() not in target_project_ids:
+                target_project_ids.append(str(pid).strip())
+    elif project_ids_raw:
+        for pid in str(project_ids_raw).split(','):
+            if pid.strip() and pid.strip() not in target_project_ids:
+                target_project_ids.append(pid.strip())
+    if project_id and str(project_id).strip() and str(project_id).strip() not in target_project_ids:
+        target_project_ids.append(str(project_id).strip())
+
+    if not target_project_ids:
+        return jsonify({"success": False, "message": "请至少选择一个所属项目进行查询！"}), 400
+
+    status_filter = params.get('status') # wait, doing, done, closed 等
+    year_filter = params.get('year') # 2026 等
+    keyword = params.get('keyword', '').strip().lower()
+
+    # 完成人过滤 (支持多选)
+    finished_by_raw = params.get('finished_by') or params.get('finished_by_list') or []
+    target_finished_by = []
+    if isinstance(finished_by_raw, list):
+        for u in finished_by_raw:
+            u_clean = str(u).strip().lower()
+            if u_clean and u_clean not in target_finished_by:
+                target_finished_by.append(u_clean)
+    elif finished_by_raw:
+        for u in str(finished_by_raw).split(','):
+            u_clean = u.strip().lower()
+            if u_clean and u_clean not in target_finished_by:
+                target_finished_by.append(u_clean)
+
+    try:
+        # 获取项目映射字典
+        proj_map = {}
+        try:
+            for p in client.get_all_projects():
+                p_id = str(p.get('id', '')).strip()
+                p_name = p.get('name', '').strip()
+                if p_id:
+                    proj_map[p_id] = p_name
+        except Exception as p_e:
+            app.logger.warning(f"Failed to get_all_projects: {p_e}")
+
+        tasks = []
+        seen_tids = set()
+
+        def fetch_single_project_tasks(pid):
+            try:
+                return pid, client.get_project_tasks(int(pid), fetch_all=True)
+            except Exception as pe:
+                app.logger.warning(f"Failed to get tasks for project {pid}: {pe}")
+                return pid, []
+
+        workers = min(8, len(target_project_ids))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            p_results = list(executor.map(fetch_single_project_tasks, target_project_ids))
+
+        for pid, p_tasks in p_results:
+            for pt in p_tasks:
+                pt_id = str(pt.get('id', '')).strip()
+                if pt_id and pt_id not in seen_tids:
+                    seen_tids.add(pt_id)
+                    tasks.append(pt)
+
+        matched = []
+        for t in tasks:
+            # 状态过滤
+            if status_filter and status_filter != 'all' and t.get('status') != status_filter:
+                continue
+
+            # 完成人过滤 (可多选，选中的任意一人匹配即可)
+            if target_finished_by:
+                t_finished = str(t.get('finishedBy') or '').strip().lower()
+                if not t_finished or t_finished not in target_finished_by:
+                    continue
+
+            # 预计开始年份过滤：要求预计开始时间字段 (estStarted) 需要大于等于设置年份的1月1号 (如 >= 2026-01-01)
+            if year_filter:
+                y_str = str(year_filter).strip()
+                if y_str:
+                    year_match = re.search(r'\d{4}', y_str)
+                    target_year = year_match.group(0) if year_match else y_str
+                    threshold_date = f"{target_year}-01-01"
+
+                    est = str(t.get('estStarted') or '').strip()
+                    if not est or est.startswith('0000'):
+                        continue
+                    est_date = est[:10]
+                    if est_date < threshold_date:
+                        continue
+
+            # 关键字过滤 (支持匹配 ID、任务名称)
+            if keyword:
+                tid = str(t.get('id', '')).lower()
+                tname = str(t.get('name', '')).lower()
+                if keyword not in tid and keyword not in tname:
+                    continue
+
+            # 补充项目中文名与人员中文名
+            pid_str = str(t.get('project') or '')
+            projectName = proj_map.get(pid_str, f"[{pid_str}]" if pid_str else "")
+            assignedTo = t.get('assignedTo', '')
+            assignedToRealname = t.get('assignedToRealname', '') or assignedTo
+            finishedBy = t.get('finishedBy', '')
+            finishedByRealname = t.get('finishedByRealname', '') or finishedBy
+            openedBy = t.get('openedBy', '')
+            openedByRealname = t.get('openedByRealname', '') or openedBy
+
+            t['projectName'] = projectName
+            t['assignedToRealname'] = assignedToRealname
+            t['finishedByRealname'] = finishedByRealname
+            t['openedByRealname'] = openedByRealname
+
+            matched.append(t)
+
+        return jsonify({
+            "success": True,
+            "tasks": matched,
+            "total": len(matched),
+            "project_ids": target_project_ids
+        })
+    except Exception as e:
+        app.logger.error(f"api_query_project_tasks error: {e}", exc_info=True)
         return jsonify({"success": False, "message": str(e)}), 500
 
 
@@ -709,6 +918,82 @@ def api_ai_export_content():
         )
         response.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{encoded_name}"
         return response
+
+
+# ==========================================
+# 团队分组与组员配置管理 (Groups & Members)
+# ==========================================
+GROUPS_FILE = os.path.join(os.path.dirname(__file__), 'user_groups.json')
+
+def load_user_groups():
+    if os.path.exists(GROUPS_FILE):
+        try:
+            with open(GROUPS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            app.logger.warning(f"Failed to load user_groups.json: {e}")
+    # 默认初始化预设分组
+    default_groups = [
+        {
+            "id": "grp_default_app",
+            "name": "应用组",
+            "members": [
+                {"account": "wanglinmiao", "realname": "王淋淼"}
+            ]
+        }
+    ]
+    save_user_groups(default_groups)
+    return default_groups
+
+def save_user_groups(groups):
+    try:
+        with open(GROUPS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(groups, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        app.logger.error(f"Failed to save user_groups.json: {e}")
+        return False
+
+@app.route('/api/groups', methods=['GET'])
+def api_get_groups():
+    groups = load_user_groups()
+    return jsonify({"success": True, "groups": groups})
+
+@app.route('/api/groups', methods=['POST'])
+def api_save_group():
+    data = request.get_json() or {}
+    group_id = data.get('id')
+    name = (data.get('name') or '').strip()
+    members = data.get('members') or []
+
+    if not name:
+        return jsonify({"success": False, "message": "分组名称不能为空"}), 400
+
+    groups = load_user_groups()
+    if group_id:
+        found = False
+        for g in groups:
+            if g.get('id') == group_id:
+                g['name'] = name
+                g['members'] = members
+                found = True
+                break
+        if not found:
+            groups.append({"id": group_id, "name": name, "members": members})
+    else:
+        new_id = f"grp_{int(time.time()*1000)}"
+        group_id = new_id
+        groups.append({"id": new_id, "name": name, "members": members})
+
+    save_user_groups(groups)
+    return jsonify({"success": True, "message": "分组保存成功", "group_id": group_id, "groups": groups})
+
+@app.route('/api/groups/<group_id>', methods=['DELETE'])
+def api_delete_group(group_id):
+    groups = load_user_groups()
+    new_groups = [g for g in groups if g.get('id') != group_id]
+    save_user_groups(new_groups)
+    return jsonify({"success": True, "message": "分组已删除", "groups": new_groups})
 
 
 if __name__ == '__main__':

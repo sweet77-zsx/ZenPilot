@@ -347,10 +347,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     reportReporterInput.value = data.realname || data.account || '';
                 }
 
-                // 实时加载所有项目与用户列表，并刷新目标用户下拉选择器
+                // 实时加载所有项目、分组与用户列表，并刷新目标用户下拉选择器
                 loadProjects();
+                loadGroups();
                 loadUsers().then(() => {
                     initFilterUserSelect();
+                    initPTabFinishedBySelect();
                 });
 
                 // 按当前登录账号隔离加载专属 AI 对话历史
@@ -401,6 +403,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         let activeIndex = -1;
         let currentFiltered = [];
+        let isComposing = false;
+        let searchTimer = null;
 
         function highlightMatch(text, keyword) {
             if (!keyword) return escapeHtml(text);
@@ -424,6 +428,8 @@ document.addEventListener('DOMContentLoaded', () => {
             currentFiltered = matched;
             activeIndex = -1;
 
+            const displayList = matched.slice(0, 100);
+
             let html = '';
             if (includeAll && !kw) {
                 const isSelected = !hiddenInput.value;
@@ -438,7 +444,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (matched.length === 0) {
                 html += `<div class="searchable-select-empty">未找到包含「${escapeHtml(keyword)}」的项目</div>`;
             } else {
-                matched.forEach(p => {
+                displayList.forEach(p => {
                     const isSelected = String(hiddenInput.value) === String(p.id);
                     html += `
                         <div class="searchable-select-item ${isSelected ? 'is-selected' : ''}" data-id="${p.id}" data-name="${escapeHtml(p.name)}">
@@ -447,20 +453,24 @@ document.addEventListener('DOMContentLoaded', () => {
                         </div>
                     `;
                 });
+                if (matched.length > 100) {
+                    html += `<div class="searchable-select-empty" style="font-size:11px; color:#94a3b8;">还有 ${matched.length - 100} 个项目，请输入更精确的关键字</div>`;
+                }
             }
 
             dropdown.innerHTML = html;
-
-            // 绑定选项点击事件
-            dropdown.querySelectorAll('.searchable-select-item').forEach(el => {
-                el.addEventListener('mousedown', (e) => {
-                    e.preventDefault(); // 阻止失焦导致下拉提前关闭
-                    const id = el.getAttribute('data-id');
-                    const name = el.getAttribute('data-name');
-                    chooseItem(id, name);
-                });
-            });
         }
+
+        // 使用事件委托统一处理下拉项点击，避免频繁绑定
+        dropdown.addEventListener('mousedown', (e) => {
+            const el = e.target.closest('.searchable-select-item');
+            if (el) {
+                e.preventDefault();
+                const id = el.getAttribute('data-id');
+                const name = el.getAttribute('data-name');
+                chooseItem(id, name);
+            }
+        });
 
         function chooseItem(id, name) {
             hiddenInput.value = id || '';
@@ -477,7 +487,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         function openDropdown() {
-            // 先关闭页面上其他打开的下拉
             document.querySelectorAll('.searchable-select-wrapper.is-open').forEach(w => {
                 if (w !== wrapper) {
                     w.classList.remove('is-open');
@@ -492,10 +501,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         function closeDropdown() {
+            if (!wrapper.classList.contains('is-open')) return;
             wrapper.classList.remove('is-open');
             dropdown.style.display = 'none';
             activeIndex = -1;
-            // 失焦时校验值与显示同步
             if (!hiddenInput.value) {
                 input.value = '';
             } else {
@@ -507,7 +516,23 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        // 绑定输入与聚焦事件
+        function toggleDropdown() {
+            if (wrapper.classList.contains('is-open')) {
+                closeDropdown();
+            } else {
+                openDropdown();
+                input.focus();
+            }
+        }
+
+        const arrow = wrapper.querySelector('.searchable-select-arrow');
+        if (arrow) {
+            arrow.addEventListener('click', (e) => {
+                e.stopPropagation();
+                toggleDropdown();
+            });
+        }
+
         input.addEventListener('focus', () => {
             openDropdown();
             input.select();
@@ -519,12 +544,26 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
 
+        input.addEventListener('compositionstart', () => { isComposing = true; });
+        input.addEventListener('compositionend', () => {
+            isComposing = false;
+            scheduleSearch();
+        });
+
+        function scheduleSearch() {
+            if (searchTimer) clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => {
+                const kw = input.value.trim().replace(/^\[\d+\]\s*/, '');
+                if (clearBtn) clearBtn.style.display = kw ? 'block' : 'none';
+                renderList(kw);
+            }, 80);
+        }
+
         input.addEventListener('input', () => {
             wrapper.classList.add('is-open');
             dropdown.style.display = 'block';
-            const kw = input.value.trim();
-            if (clearBtn) clearBtn.style.display = kw ? 'block' : 'none';
-            renderList(kw);
+            if (isComposing) return;
+            scheduleSearch();
         });
 
         // 键盘上下选择与回车确认
@@ -612,6 +651,340 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
+    // 通用多选项目组件 Multi-Select Project Component
+    function setupMultiSelectProject({
+        wrapper,
+        box,
+        tagsContainer,
+        input,
+        hiddenInput,
+        clearBtn,
+        dropdown,
+        items = [],
+        placeholder = '输入名称/ID搜索项目 (全部)',
+        onChange = null
+    }) {
+        if (!wrapper || !input || !dropdown) return null;
+
+        const selectedMap = new Map();
+        let isComposing = false;
+        let searchTimer = null;
+
+        // 增量更新标签 (Diffing)，避免无脑 innerHTML 重绘导致整个页面大回流及动画重播
+        function renderTags() {
+            if (!tagsContainer) return;
+
+            // 1. 收集现有 tag 节点映射
+            const existingTags = new Map();
+            tagsContainer.querySelectorAll('.multi-select-tag').forEach(tag => {
+                const id = tag.getAttribute('data-id');
+                if (id) existingTags.set(id, tag);
+            });
+
+            // 2. 移除已被取消选中的 tag
+            existingTags.forEach((tagEl, id) => {
+                if (!selectedMap.has(id)) {
+                    tagEl.remove();
+                }
+            });
+
+            // 3. 追加新选中的 tag (保持原有 tag 节点不动)
+            selectedMap.forEach((name, id) => {
+                if (!existingTags.has(id)) {
+                    const tagEl = document.createElement('span');
+                    tagEl.className = 'multi-select-tag';
+                    tagEl.setAttribute('data-id', id);
+                    tagEl.setAttribute('title', `[${id}] ${name}`);
+                    tagEl.innerHTML = `
+                        <span class="tag-text">[${id}] ${escapeHtml(name)}</span>
+                        <span class="tag-remove" data-id="${id}" title="移除该项目">&times;</span>
+                    `;
+                    tagsContainer.appendChild(tagEl);
+                }
+            });
+
+            if (selectedMap.size > 0) {
+                input.placeholder = '继续搜索添加项目...';
+                if (clearBtn) clearBtn.style.display = 'block';
+            } else {
+                input.placeholder = placeholder;
+                if (clearBtn) clearBtn.style.display = 'none';
+            }
+
+            if (hiddenInput) {
+                hiddenInput.value = Array.from(selectedMap.keys()).join(',');
+            }
+        }
+
+        // 使用委托监听标签移除
+        if (tagsContainer) {
+            tagsContainer.addEventListener('click', (e) => {
+                const btn = e.target.closest('.tag-remove');
+                if (!btn) return;
+                e.stopPropagation();
+                const removeId = btn.getAttribute('data-id');
+                if (removeId && selectedMap.has(removeId)) {
+                    selectedMap.delete(removeId);
+                    renderTags();
+                    syncDropdownItem(removeId, false);
+                    if (onChange) onChange(Array.from(selectedMap.keys()));
+                }
+            });
+        }
+
+        function highlightMatch(text, keyword) {
+            if (!keyword) return escapeHtml(text);
+            const escapedText = escapeHtml(text);
+            const lowerText = escapedText.toLowerCase();
+            const lowerKey = keyword.toLowerCase();
+            const idx = lowerText.indexOf(lowerKey);
+            if (idx === -1) return escapedText;
+            const before = escapedText.substring(0, idx);
+            const match = escapedText.substring(idx, idx + keyword.length);
+            const after = escapedText.substring(idx + keyword.length);
+            return `${before}<span class="item-highlight">${match}</span>${after}`;
+        }
+
+        function syncDropdownItem(id, isSelected) {
+            const el = dropdown.querySelector(`.searchable-select-item[data-id="${id}"]`);
+            if (el) {
+                if (isSelected) {
+                    el.classList.add('is-selected');
+                    const cb = el.querySelector('.item-checkbox');
+                    if (cb) cb.textContent = '✓';
+                } else {
+                    el.classList.remove('is-selected');
+                    const cb = el.querySelector('.item-checkbox');
+                    if (cb) cb.textContent = '';
+                }
+            }
+            const headerCount = dropdown.querySelector('.searchable-select-dropdown-header b');
+            if (headerCount) headerCount.textContent = selectedMap.size;
+        }
+
+        function renderDropdownList(keyword = '') {
+            const kw = keyword.trim().toLowerCase();
+            let matched = items.filter(p => {
+                if (!kw) return true;
+                return String(p.id).toLowerCase().includes(kw) || String(p.name).toLowerCase().includes(kw);
+            });
+
+            // 限制最多渲染 200 项，防止 DOM 暴增卡顿
+            const displayList = matched.slice(0, 200);
+
+            let html = '';
+            html += `
+                <div class="searchable-select-dropdown-header">
+                    <span>已选 <b>${selectedMap.size}</b> 个项目</span>
+                    ${selectedMap.size > 0 ? `<button type="button" id="btnMultiSelectClearAll">清空已选 (全部)</button>` : `<span>点击下方项目多选</span>`}
+                </div>
+            `;
+
+            if (matched.length === 0) {
+                html += `<div class="searchable-select-empty">未找到包含「${escapeHtml(keyword)}」的项目</div>`;
+            } else {
+                displayList.forEach(p => {
+                    const isChecked = selectedMap.has(String(p.id));
+                    html += `
+                        <div class="searchable-select-item ${isChecked ? 'is-selected' : ''}" data-id="${p.id}" data-name="${escapeHtml(p.name)}">
+                            <span class="item-checkbox">${isChecked ? '✓' : ''}</span>
+                            <span class="item-id-badge">[${p.id}]</span>
+                            <span class="item-name">${highlightMatch(p.name, keyword)}</span>
+                        </div>
+                    `;
+                });
+                if (matched.length > 200) {
+                    html += `<div class="searchable-select-empty" style="font-size:11px; color:#94a3b8;">还有 ${matched.length - 200} 个项目，请输入更精确的关键字过滤</div>`;
+                }
+            }
+
+            dropdown.innerHTML = html;
+        }
+
+        // 使用事件委托统一处理下拉框点击
+        dropdown.addEventListener('mousedown', (e) => {
+            const btnClearAll = e.target.closest('#btnMultiSelectClearAll');
+            if (btnClearAll) {
+                e.preventDefault();
+                selectedMap.clear();
+                input.value = '';
+                renderTags();
+                renderDropdownList('');
+                if (onChange) onChange([]);
+                return;
+            }
+
+            const itemEl = e.target.closest('.searchable-select-item');
+            if (itemEl) {
+                e.preventDefault();
+                const id = String(itemEl.getAttribute('data-id'));
+                const name = itemEl.getAttribute('data-name');
+                if (selectedMap.has(id)) {
+                    selectedMap.delete(id);
+                    itemEl.classList.remove('is-selected');
+                    const cb = itemEl.querySelector('.item-checkbox');
+                    if (cb) cb.textContent = '';
+                } else {
+                    selectedMap.set(id, name);
+                    itemEl.classList.add('is-selected');
+                    const cb = itemEl.querySelector('.item-checkbox');
+                    if (cb) cb.textContent = '✓';
+                }
+                const headerCount = dropdown.querySelector('.searchable-select-dropdown-header b');
+                if (headerCount) headerCount.textContent = selectedMap.size;
+                renderTags();
+
+                // 选中/取消后立即清空搜索关键字，重置下拉列表并保持光标聚焦
+                if (input.value) {
+                    input.value = '';
+                    renderDropdownList('');
+                }
+                input.focus();
+
+                if (onChange) onChange(Array.from(selectedMap.keys()));
+            }
+        });
+
+        function openDropdown() {
+            if (wrapper.classList.contains('is-open')) return;
+            document.querySelectorAll('.searchable-select-wrapper.is-open').forEach(w => {
+                if (w !== wrapper) {
+                    w.classList.remove('is-open');
+                    const dd = w.querySelector('.searchable-select-dropdown');
+                    if (dd) dd.style.display = 'none';
+                }
+            });
+            wrapper.classList.add('is-open');
+            dropdown.style.display = 'block';
+            renderDropdownList(input.value.trim());
+        }
+
+        function closeDropdown() {
+            if (!wrapper.classList.contains('is-open')) return;
+            wrapper.classList.remove('is-open');
+            dropdown.style.display = 'none';
+            if (input.value) {
+                input.value = '';
+            }
+        }
+
+        function toggleDropdown() {
+            if (wrapper.classList.contains('is-open')) {
+                closeDropdown();
+            } else {
+                openDropdown();
+                input.focus();
+            }
+        }
+
+        // 下拉箭头支持 Toggle
+        const arrow = wrapper.querySelector('.searchable-select-arrow');
+        if (arrow) {
+            arrow.addEventListener('click', (e) => {
+                e.stopPropagation();
+                toggleDropdown();
+            });
+        }
+
+        if (box) {
+            box.addEventListener('click', (e) => {
+                if (!e.target.closest('.tag-remove')) {
+                    if (!wrapper.classList.contains('is-open')) {
+                        openDropdown();
+                    }
+                    input.focus();
+                }
+            });
+        }
+
+        input.addEventListener('focus', () => {
+            if (!wrapper.classList.contains('is-open')) {
+                openDropdown();
+            }
+        });
+
+        // 中文输入法 Composition 状态守卫及防抖优化
+        input.addEventListener('compositionstart', () => {
+            isComposing = true;
+        });
+
+        input.addEventListener('compositionend', () => {
+            isComposing = false;
+            scheduleSearch();
+        });
+
+        function scheduleSearch() {
+            if (searchTimer) clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => {
+                renderDropdownList(input.value.trim());
+            }, 80);
+        }
+
+        input.addEventListener('input', () => {
+            if (!wrapper.classList.contains('is-open')) {
+                wrapper.classList.add('is-open');
+                dropdown.style.display = 'block';
+            }
+            if (isComposing) return;
+            scheduleSearch();
+        });
+
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Backspace' && !input.value && selectedMap.size > 0) {
+                const keys = Array.from(selectedMap.keys());
+                const lastKey = keys[keys.length - 1];
+                selectedMap.delete(lastKey);
+                renderTags();
+                syncDropdownItem(lastKey, false);
+                if (onChange) onChange(Array.from(selectedMap.keys()));
+            } else if (e.key === 'Escape') {
+                closeDropdown();
+            }
+        });
+
+        if (clearBtn) {
+            clearBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                selectedMap.clear();
+                input.value = '';
+                renderTags();
+                renderDropdownList('');
+                if (onChange) onChange([]);
+            });
+        }
+
+        document.addEventListener('click', (e) => {
+            if (!wrapper.contains(e.target)) {
+                closeDropdown();
+            }
+        });
+
+        return {
+            getSelectedIds: () => Array.from(selectedMap.keys()),
+            setSelectedIds: (ids = []) => {
+                selectedMap.clear();
+                ids.forEach(id => {
+                    const found = items.find(p => String(p.id) === String(id));
+                    if (found) selectedMap.set(String(id), found.name);
+                });
+                renderTags();
+            },
+            updateItems: (newItems) => {
+                items = newItems || [];
+                renderTags();
+                if (wrapper.classList.contains('is-open')) {
+                    renderDropdownList(input.value.trim());
+                }
+            },
+            clear: () => {
+                selectedMap.clear();
+                input.value = '';
+                renderTags();
+            }
+        };
+    }
+    window.setupMultiSelectProject = setupMultiSelectProject;
+
     // 通用构建可搜索用户下拉选择组件
     function setupSearchableUserSelect({
         wrapper,
@@ -621,12 +994,15 @@ document.addEventListener('DOMContentLoaded', () => {
         dropdown,
         placeholder = '输入姓名/账号搜索用户...',
         includeMe = false,
+        includeAll = false,
         onSelect = null
     }) {
         if (!wrapper || !input || !hiddenInput || !dropdown) return null;
 
         let activeIndex = -1;
         let currentFiltered = [];
+        let isComposing = false;
+        let searchTimer = null;
 
         function highlightMatch(text, keyword) {
             if (!keyword) return escapeHtml(text);
@@ -650,6 +1026,8 @@ document.addEventListener('DOMContentLoaded', () => {
             currentFiltered = matched;
             activeIndex = -1;
 
+            const displayList = matched.slice(0, 100);
+
             let html = '';
 
             // 如果支持选择当前登录人“我”
@@ -658,7 +1036,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     (currentUserRealname && currentUserRealname.toLowerCase().includes(kw)) ||
                     (currentAccount && currentAccount.toLowerCase().includes(kw));
                 if (isMatchMe) {
-                    const isMeSelected = (!hiddenInput.value || (currentAccount && hiddenInput.value.toLowerCase() === currentAccount.toLowerCase()));
+                    const isMeSelected = (currentAccount && hiddenInput.value.toLowerCase() === currentAccount.toLowerCase());
                     html += `
                         <div class="searchable-select-item ${isMeSelected ? 'is-selected' : ''}" data-account="${escapeHtml(currentAccount)}" data-realname="${escapeHtml(currentUserRealname || currentAccount)}" data-is-me="true">
                             <span class="item-id-badge" style="background:#fef3c7; color:#d97706; font-weight:700;">🌟 我</span>
@@ -673,9 +1051,8 @@ document.addEventListener('DOMContentLoaded', () => {
             } else if (matched.length === 0 && !html) {
                 html = `<div class="searchable-select-empty">未找到匹配「${escapeHtml(keyword)}」的用户</div>`;
             } else {
-                matched.forEach(u => {
-                    // 若已在首项单独显示“我”，列表中对应当前用户项显示高亮区分
-                    const isSelected = String(hiddenInput.value).toLowerCase() === String(u.account).toLowerCase();
+                displayList.forEach(u => {
+                    const isSelected = hiddenInput.value && String(hiddenInput.value).toLowerCase() === String(u.account).toLowerCase();
                     const isCurrentUser = currentAccount && String(u.account).toLowerCase() === currentAccount.toLowerCase();
                     html += `
                         <div class="searchable-select-item ${isSelected ? 'is-selected' : ''}" data-account="${escapeHtml(u.account)}" data-realname="${escapeHtml(u.realname)}" ${isCurrentUser ? 'data-is-me="true"' : ''}>
@@ -684,27 +1061,31 @@ document.addEventListener('DOMContentLoaded', () => {
                         </div>
                     `;
                 });
+                if (matched.length > 100) {
+                    html += `<div class="searchable-select-empty" style="font-size:11px; color:#94a3b8;">还有 ${matched.length - 100} 位用户，请输入更精确的关键字</div>`;
+                }
             }
 
             dropdown.innerHTML = html;
-
-            dropdown.querySelectorAll('.searchable-select-item').forEach(el => {
-                el.addEventListener('mousedown', (e) => {
-                    e.preventDefault();
-                    const account = el.getAttribute('data-account');
-                    const realname = el.getAttribute('data-realname');
-                    const isMe = el.getAttribute('data-is-me') === 'true';
-                    chooseItem(account, realname, isMe);
-                });
-            });
         }
 
+        // 事件委托统一处理用户项点击
+        dropdown.addEventListener('mousedown', (e) => {
+            const el = e.target.closest('.searchable-select-item');
+            if (el) {
+                e.preventDefault();
+                const account = el.getAttribute('data-account');
+                const realname = el.getAttribute('data-realname');
+                const isMe = el.getAttribute('data-is-me') === 'true';
+                chooseItem(account, realname, isMe);
+            }
+        });
+
         function chooseItem(account, realname, isMe = false) {
-            const reallyMe = isMe || (includeMe && (!account || (currentAccount && String(account).toLowerCase() === currentAccount.toLowerCase())));
-            if (reallyMe) {
+            if (isMe) {
                 hiddenInput.value = currentAccount || '';
                 input.value = `我 (${currentUserRealname || currentAccount || '当前登录用户'})`;
-                if (clearBtn) clearBtn.style.display = 'none';
+                if (clearBtn) clearBtn.style.display = 'block';
                 closeDropdown();
                 if (onSelect) onSelect(currentAccount, currentUserRealname || currentAccount, true);
                 return;
@@ -747,6 +1128,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         function closeDropdown() {
+            if (!wrapper.classList.contains('is-open')) return;
             wrapper.classList.remove('is-open');
             dropdown.style.display = 'none';
             activeIndex = -1;
@@ -761,21 +1143,47 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
+        function toggleDropdown() {
+            if (wrapper.classList.contains('is-open')) {
+                closeDropdown();
+            } else {
+                openDropdown();
+                input.focus();
+            }
+        }
+
+        const arrow = wrapper.querySelector('.searchable-select-arrow');
+        if (arrow) {
+            arrow.addEventListener('click', (e) => {
+                e.stopPropagation();
+                toggleDropdown();
+            });
+        }
+
         input.addEventListener('focus', openDropdown);
         input.addEventListener('click', openDropdown);
+
+        input.addEventListener('compositionstart', () => { isComposing = true; });
+        input.addEventListener('compositionend', () => {
+            isComposing = false;
+            scheduleSearch();
+        });
+
+        function scheduleSearch() {
+            if (searchTimer) clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => {
+                const kw = input.value.trim();
+                if (clearBtn) clearBtn.style.display = kw ? 'block' : 'none';
+                renderList(kw);
+            }, 80);
+        }
 
         input.addEventListener('input', () => {
             if (!wrapper.classList.contains('is-open')) {
                 openDropdown();
-            } else {
-                renderList(input.value.trim());
             }
-            if (clearBtn) {
-                clearBtn.style.display = input.value.trim() ? 'block' : 'none';
-            }
-            if (!input.value.trim()) {
-                hiddenInput.value = '';
-            }
+            if (isComposing) return;
+            scheduleSearch();
         });
 
         input.addEventListener('keydown', (e) => {
@@ -830,19 +1238,6 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         }
 
-        const arrow = wrapper.querySelector('.searchable-select-arrow');
-        if (arrow) {
-            arrow.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (wrapper.classList.contains('is-open')) {
-                    closeDropdown();
-                } else {
-                    input.focus();
-                    openDropdown();
-                }
-            });
-        }
-
         // 初始化默认选“我”
         if (includeMe && (!hiddenInput.value || hiddenInput.value === currentAccount)) {
             chooseItem(currentAccount, currentUserRealname, true);
@@ -859,13 +1254,484 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
-    // 动态刷新任务范围类型下拉框的选项文案
-    function updateViewTypeOptions(displayName, isMe) {
+    // 初始化多选目标用户组件
+    function setupMultiSelectUser({
+        wrapper,
+        box,
+        tagsContainer,
+        input,
+        hiddenInput,
+        clearBtn,
+        dropdown,
+        placeholder = '输入姓名/账号搜索用户 (默认我)',
+        defaultSelectCurrentUser = true,
+        onChange = null
+    }) {
+        if (!wrapper || !input || !dropdown) return null;
+
+        // Map<account, { account, realname, isMe }>
+        const selectedMap = new Map();
+        let isComposing = false;
+        let searchTimer = null;
+
+        // 默认若允许选中当前登录用户且有账号，默认填入“我”
+        if (defaultSelectCurrentUser && currentAccount) {
+            selectedMap.set(currentAccount, {
+                account: currentAccount,
+                realname: currentUserRealname || currentAccount,
+                isMe: true
+            });
+        }
+
+        // 增量更新标签 (Diffing)，避免无脑 innerHTML 重绘导致整个页面大回流及动画重播
+        function renderTags() {
+            if (!tagsContainer) return;
+
+            // 1. 收集现有 tag 节点映射
+            const existingTags = new Map();
+            tagsContainer.querySelectorAll('.multi-select-tag').forEach(tag => {
+                const acc = tag.getAttribute('data-account');
+                if (acc) existingTags.set(acc, tag);
+            });
+
+            // 2. 移除已被取消选中的 tag
+            existingTags.forEach((tagEl, acc) => {
+                if (!selectedMap.has(acc)) {
+                    tagEl.remove();
+                }
+            });
+
+            // 3. 追加新选中的 tag (保持原有 tag 节点不动)
+            selectedMap.forEach((u, acc) => {
+                if (!existingTags.has(acc)) {
+                    const isMe = u.isMe || (currentAccount && acc.toLowerCase() === currentAccount.toLowerCase());
+                    const badgeStyle = isMe ? 'background:#fef3c7; color:#92400e; border:1px solid #fde68a;' : '';
+                    const titleText = isMe ? `🌟 我 (${u.realname || acc})` : `${u.realname || acc} (@${acc})`;
+
+                    const tagEl = document.createElement('span');
+                    tagEl.className = 'multi-select-tag';
+                    if (badgeStyle) tagEl.style.cssText = badgeStyle;
+                    tagEl.setAttribute('data-account', acc);
+                    tagEl.setAttribute('title', titleText);
+                    tagEl.innerHTML = `
+                        <span class="tag-text">${escapeHtml(titleText)}</span>
+                        <span class="tag-remove" data-account="${escapeHtml(acc)}" title="移除该用户">&times;</span>
+                    `;
+                    tagsContainer.appendChild(tagEl);
+                }
+            });
+
+            if (selectedMap.size > 0) {
+                input.placeholder = '';
+                if (clearBtn) clearBtn.style.display = 'block';
+            } else {
+                input.placeholder = placeholder;
+                if (clearBtn) clearBtn.style.display = 'none';
+            }
+
+            if (hiddenInput) {
+                hiddenInput.value = Array.from(selectedMap.keys()).join(',');
+            }
+        }
+
+        // 使用委托监听标签移除
+        if (tagsContainer) {
+            tagsContainer.addEventListener('click', (e) => {
+                const btn = e.target.closest('.tag-remove');
+                if (!btn) return;
+                e.stopPropagation();
+                const removeAcc = btn.getAttribute('data-account');
+                if (removeAcc && selectedMap.has(removeAcc)) {
+                    selectedMap.delete(removeAcc);
+                    renderTags();
+                    syncDropdownItem(removeAcc, false);
+                    if (onChange) onChange(Array.from(selectedMap.values()));
+                }
+            });
+        }
+
+        function highlightMatch(text, keyword) {
+            if (!keyword) return escapeHtml(text);
+            const escapedText = escapeHtml(text);
+            const lowerText = escapedText.toLowerCase();
+            const lowerKey = keyword.toLowerCase();
+            const idx = lowerText.indexOf(lowerKey);
+            if (idx === -1) return escapedText;
+            const before = escapedText.substring(0, idx);
+            const match = escapedText.substring(idx, idx + keyword.length);
+            const after = escapedText.substring(idx + keyword.length);
+            return `${before}<span class="item-highlight">${match}</span>${after}`;
+        }
+
+        function syncDropdownItem(acc, isSelected) {
+            const el = dropdown.querySelector(`.searchable-select-item[data-account="${acc}"]`);
+            if (el) {
+                if (isSelected) {
+                    el.classList.add('is-selected');
+                    const cb = el.querySelector('.item-checkbox');
+                    if (cb) cb.textContent = '✓';
+                } else {
+                    el.classList.remove('is-selected');
+                    const cb = el.querySelector('.item-checkbox');
+                    if (cb) cb.textContent = '';
+                }
+            }
+            const headerCount = dropdown.querySelector('.searchable-select-dropdown-header b');
+            if (headerCount) headerCount.textContent = selectedMap.size;
+        }
+
+        function renderDropdownList(keyword = '') {
+            const kw = keyword.trim().toLowerCase();
+            let matched = cachedUsers.filter(u => {
+                if (!kw) return true;
+                return String(u.account).toLowerCase().includes(kw) || String(u.realname).toLowerCase().includes(kw);
+            });
+
+            // 限制最多渲染 200 项，防止 DOM 暴增卡顿
+            const displayList = matched.slice(0, 200);
+
+            let html = '';
+            html += `
+                <div class="searchable-select-dropdown-header">
+                    <span>已选 <b>${selectedMap.size}</b> 位用户</span>
+                    <div style="display:flex; gap:8px;">
+                        <button type="button" class="btn-user-reset-me" id="btnUserResetMe">仅选我</button>
+                        ${selectedMap.size > 0 ? `<button type="button" class="btn-user-clear-all" id="btnUserClearAll">清空已选</button>` : ''}
+                    </div>
+                </div>
+            `;
+
+            // 当前登录人首项置顶 (未搜关键字或关键字与我匹配)
+            if (currentAccount) {
+                const isMatchMe = !kw || '我'.includes(kw) || 'me'.includes(kw) ||
+                    (currentUserRealname && currentUserRealname.toLowerCase().includes(kw)) ||
+                    (currentAccount.toLowerCase().includes(kw));
+                if (isMatchMe) {
+                    const isChecked = selectedMap.has(currentAccount);
+                    html += `
+                        <div class="searchable-select-item ${isChecked ? 'is-selected' : ''}" data-account="${escapeHtml(currentAccount)}" data-realname="${escapeHtml(currentUserRealname || currentAccount)}" data-is-me="true">
+                            <span class="item-checkbox">${isChecked ? '✓' : ''}</span>
+                            <span class="item-id-badge" style="background:#fef3c7; color:#d97706; font-weight:700;">🌟 我</span>
+                            <span class="item-name">当前登录用户 (${escapeHtml(currentUserRealname || currentAccount || '我')})</span>
+                        </div>
+                    `;
+                }
+            }
+
+            if (cachedUsers.length === 0 && !currentAccount) {
+                html += `<div class="searchable-select-empty" style="color:#2563eb;">⏳ 正在查询禅道所有用户...</div>`;
+            } else if (matched.length === 0 && (!currentAccount || !(!kw || '我'.includes(kw)))) {
+                html += `<div class="searchable-select-empty">未找到匹配「${escapeHtml(keyword)}」的用户</div>`;
+            } else {
+                displayList.forEach(u => {
+                    const isMe = currentAccount && String(u.account).toLowerCase() === currentAccount.toLowerCase();
+                    if (isMe) return;
+                    const isChecked = selectedMap.has(String(u.account));
+                    html += `
+                        <div class="searchable-select-item ${isChecked ? 'is-selected' : ''}" data-account="${escapeHtml(u.account)}" data-realname="${escapeHtml(u.realname)}">
+                            <span class="item-checkbox">${isChecked ? '✓' : ''}</span>
+                            <span class="item-id-badge" style="background:#eff6ff; color:#2563eb; font-weight:600;">@${escapeHtml(u.account)}</span>
+                            <span class="item-name">${highlightMatch(u.realname, keyword)}</span>
+                        </div>
+                    `;
+                });
+                if (matched.length > 200) {
+                    html += `<div class="searchable-select-empty" style="font-size:11px; color:#94a3b8;">还有 ${matched.length - 200} 位用户，请输入更精确的关键字过滤</div>`;
+                }
+            }
+
+            dropdown.innerHTML = html;
+        }
+
+        // 使用事件委托统一处理下拉框内用户点击
+        dropdown.addEventListener('mousedown', (e) => {
+            const btnResetMe = e.target.closest('#btnUserResetMe, .btn-user-reset-me');
+            if (btnResetMe) {
+                e.preventDefault();
+                selectedMap.clear();
+                if (currentAccount) {
+                    selectedMap.set(currentAccount, {
+                        account: currentAccount,
+                        realname: currentUserRealname || currentAccount,
+                        isMe: true
+                    });
+                }
+                input.value = '';
+                renderTags();
+                renderDropdownList('');
+                if (onChange) onChange(Array.from(selectedMap.values()));
+                return;
+            }
+
+            const btnClearAll = e.target.closest('#btnUserClearAll, .btn-user-clear-all');
+            if (btnClearAll) {
+                e.preventDefault();
+                selectedMap.clear();
+                input.value = '';
+                renderTags();
+                renderDropdownList('');
+                if (onChange) onChange([]);
+                return;
+            }
+
+            const itemEl = e.target.closest('.searchable-select-item');
+            if (itemEl) {
+                e.preventDefault();
+                const acc = itemEl.getAttribute('data-account');
+                const realname = itemEl.getAttribute('data-realname');
+                const isMe = itemEl.getAttribute('data-is-me') === 'true';
+                if (selectedMap.has(acc)) {
+                    selectedMap.delete(acc);
+                    itemEl.classList.remove('is-selected');
+                    const cb = itemEl.querySelector('.item-checkbox');
+                    if (cb) cb.textContent = '';
+                } else {
+                    selectedMap.set(acc, { account: acc, realname, isMe });
+                    itemEl.classList.add('is-selected');
+                    const cb = itemEl.querySelector('.item-checkbox');
+                    if (cb) cb.textContent = '✓';
+                }
+                const headerCount = dropdown.querySelector('.searchable-select-dropdown-header b');
+                if (headerCount) headerCount.textContent = selectedMap.size;
+                renderTags();
+
+                // 选中/取消后立即清空搜索关键字，重置下拉列表并保持光标聚焦
+                if (input.value) {
+                    input.value = '';
+                    renderDropdownList('');
+                }
+                input.focus();
+
+                if (onChange) onChange(Array.from(selectedMap.values()));
+            }
+        });
+
+        function openDropdown() {
+            if (wrapper.classList.contains('is-open')) return;
+            document.querySelectorAll('.searchable-select-wrapper.is-open').forEach(w => {
+                if (w !== wrapper) {
+                    w.classList.remove('is-open');
+                    const dd = w.querySelector('.searchable-select-dropdown');
+                    if (dd) dd.style.display = 'none';
+                }
+            });
+            wrapper.classList.add('is-open');
+            dropdown.style.display = 'block';
+            renderDropdownList(input.value.trim());
+        }
+
+        function closeDropdown() {
+            if (!wrapper.classList.contains('is-open')) return;
+            wrapper.classList.remove('is-open');
+            dropdown.style.display = 'none';
+            if (input.value) {
+                input.value = '';
+            }
+        }
+
+        function toggleDropdown() {
+            if (wrapper.classList.contains('is-open')) {
+                closeDropdown();
+            } else {
+                openDropdown();
+                input.focus();
+            }
+        }
+
+        // 下拉箭头支持 Toggle
+        const arrow = wrapper.querySelector('.searchable-select-arrow');
+        if (arrow) {
+            arrow.addEventListener('click', (e) => {
+                e.stopPropagation();
+                toggleDropdown();
+            });
+        }
+
+        if (box) {
+            box.addEventListener('click', (e) => {
+                if (!e.target.closest('.tag-remove')) {
+                    if (!wrapper.classList.contains('is-open')) {
+                        openDropdown();
+                    }
+                    input.focus();
+                }
+            });
+        }
+
+        input.addEventListener('focus', () => {
+            if (!wrapper.classList.contains('is-open')) {
+                openDropdown();
+            }
+        });
+
+        // 中文输入法 Composition 状态守卫及防抖优化
+        input.addEventListener('compositionstart', () => {
+            isComposing = true;
+        });
+
+        input.addEventListener('compositionend', () => {
+            isComposing = false;
+            scheduleSearch();
+        });
+
+        function scheduleSearch() {
+            if (searchTimer) clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => {
+                renderDropdownList(input.value.trim());
+            }, 80);
+        }
+
+        input.addEventListener('input', () => {
+            if (!wrapper.classList.contains('is-open')) {
+                wrapper.classList.add('is-open');
+                dropdown.style.display = 'block';
+            }
+            if (isComposing) return;
+            scheduleSearch();
+        });
+
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Backspace' && !input.value.trim()) {
+                const keys = Array.from(selectedMap.keys());
+                if (keys.length > 0) {
+                    const lastKey = keys[keys.length - 1];
+                    selectedMap.delete(lastKey);
+                    renderTags();
+                    syncDropdownItem(lastKey, false);
+                    if (onChange) onChange(Array.from(selectedMap.values()));
+                }
+            } else if (e.key === 'Escape') {
+                closeDropdown();
+            }
+        });
+
+        if (clearBtn) {
+            clearBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                selectedMap.clear();
+                input.value = '';
+                renderTags();
+                renderDropdownList('');
+                if (onChange) onChange([]);
+            });
+        }
+
+        document.addEventListener('click', (e) => {
+            if (!wrapper.contains(e.target)) {
+                closeDropdown();
+            }
+        });
+
+        renderTags();
+
+        return {
+            getSelectedUsers: () => Array.from(selectedMap.values()),
+            getSelectedAccounts: () => Array.from(selectedMap.keys()),
+            setSelectedUsers: (users = []) => {
+                selectedMap.clear();
+                users.forEach(u => {
+                    const acc = String(u.account || '').trim();
+                    if (acc) {
+                        const isMe = currentAccount && acc.toLowerCase() === currentAccount.toLowerCase();
+                        selectedMap.set(acc, {
+                            account: acc,
+                            realname: u.realname || acc,
+                            isMe: isMe
+                        });
+                    }
+                });
+                renderTags();
+                if (wrapper.classList.contains('is-open')) {
+                    renderDropdownList(input.value.trim());
+                }
+                if (onChange) onChange(Array.from(selectedMap.values()));
+            },
+            setSelectedAccounts: (accounts = []) => {
+                selectedMap.clear();
+                accounts.forEach(acc => {
+                    const cleanAcc = String(acc || '').trim();
+                    if (!cleanAcc) return;
+                    const found = cachedUsers.find(u => String(u.account).toLowerCase() === cleanAcc.toLowerCase());
+                    const isMe = currentAccount && cleanAcc.toLowerCase() === currentAccount.toLowerCase();
+                    selectedMap.set(cleanAcc, {
+                        account: cleanAcc,
+                        realname: found ? found.realname : (isMe ? currentUserRealname : cleanAcc),
+                        isMe: isMe
+                    });
+                });
+                renderTags();
+                if (wrapper.classList.contains('is-open')) {
+                    renderDropdownList(input.value.trim());
+                }
+                if (onChange) onChange(Array.from(selectedMap.values()));
+            },
+            clear: () => {
+                selectedMap.clear();
+                input.value = '';
+                renderTags();
+                if (onChange) onChange([]);
+            },
+            refreshMe: () => {
+                if (defaultSelectCurrentUser && selectedMap.size === 0 && currentAccount) {
+                    selectedMap.set(currentAccount, {
+                        account: currentAccount,
+                        realname: currentUserRealname || currentAccount,
+                        isMe: true
+                    });
+                }
+                renderTags();
+                if (onChange) onChange(Array.from(selectedMap.values()));
+            },
+            resetToMe: () => {
+                selectedMap.clear();
+                if (currentAccount) {
+                    selectedMap.set(currentAccount, {
+                        account: currentAccount,
+                        realname: currentUserRealname || currentAccount,
+                        isMe: true
+                    });
+                }
+                renderTags();
+                if (onChange) onChange(Array.from(selectedMap.values()));
+            }
+        };
+    }
+    window.setupMultiSelectUser = setupMultiSelectUser;
+
+    // 动态刷新任务范围类型下拉框的选项文案，支持单人或多人联动
+    function updateViewTypeOptions(selectedUsers = []) {
         const sel = document.getElementById('filterViewType');
         if (!sel) return;
         const currentVal = sel.value;
-        const nameText = isMe ? '我' : (displayName || '选定用户');
-        const allText = isMe ? '我的全部任务' : `${nameText}的全部任务`;
+
+        let nameText = '我';
+        let allText = '我的全部任务';
+
+        if (!selectedUsers || selectedUsers.length === 0) {
+            nameText = '我 (未选默认我)';
+            allText = '我的全部任务';
+        } else if (selectedUsers.length === 1) {
+            const u = selectedUsers[0];
+            const isMe = u.isMe || (currentAccount && u.account.toLowerCase() === currentAccount.toLowerCase());
+            nameText = isMe ? '我' : (u.realname || u.account);
+            allText = isMe ? '我的全部任务' : `${nameText}的全部任务`;
+        } else {
+            // 多人模式
+            if (selectedUsers.length <= 3) {
+                const names = selectedUsers.map(u => {
+                    const isMe = u.isMe || (currentAccount && u.account.toLowerCase() === currentAccount.toLowerCase());
+                    return isMe ? '我' : (u.realname || u.account);
+                });
+                nameText = names.join('、');
+            } else {
+                const firstTwo = selectedUsers.slice(0, 2).map(u => {
+                    const isMe = u.isMe || (currentAccount && u.account.toLowerCase() === currentAccount.toLowerCase());
+                    return isMe ? '我' : (u.realname || u.account);
+                }).join('、');
+                nameText = `${firstTwo} 等${selectedUsers.length}人`;
+            }
+            allText = `${nameText}的全部任务`;
+        }
 
         sel.innerHTML = `
             <option value="finishedBy">由${nameText}完成 (finishedBy)</option>
@@ -884,10 +1750,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let filterProjectSelectInstance = null;
     let filterUserSelectInstance = null;
+    let pTabProjectSelectInstance = null;
+    let pTabFinishedBySelectInstance = null;
 
     // 初始化多维查询的目标用户下拉选择器
     function initFilterUserSelect() {
         const wrapper = document.getElementById('filterUserWrapper');
+        const box = document.getElementById('filterUserBox');
+        const tagsContainer = document.getElementById('filterUserTags');
         const input = document.getElementById('filterUserInput');
         const hidden = document.getElementById('filterUserAccount');
         const clearBtn = document.getElementById('filterUserClear');
@@ -900,21 +1770,54 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        filterUserSelectInstance = setupSearchableUserSelect({
+        filterUserSelectInstance = setupMultiSelectUser({
             wrapper,
+            box,
+            tagsContainer,
             input,
             hiddenInput: hidden,
             clearBtn,
             dropdown,
-            placeholder: '输入姓名/账号选择用户 (默认我)',
-            includeMe: true,
-            onSelect: (account, realname, isMe) => {
-                updateViewTypeOptions(realname, isMe);
+            placeholder: '输入姓名/账号搜索用户 (默认我)',
+            onChange: (selectedUsers) => {
+                updateViewTypeOptions(selectedUsers);
             }
         });
 
-        // 默认初始化文案
-        updateViewTypeOptions(currentUserRealname || currentAccount, true);
+        // 默认初始化文案联动
+        if (filterUserSelectInstance) {
+            updateViewTypeOptions(filterUserSelectInstance.getSelectedUsers());
+        }
+    }
+
+    // 初始化项目全量任务模块下的任务完成人多选选择器
+    function initPTabFinishedBySelect() {
+        const wrapper = document.getElementById('pTabFinishedByWrapper');
+        const box = document.getElementById('pTabFinishedByBox');
+        const tagsContainer = document.getElementById('pTabFinishedByTags');
+        const input = document.getElementById('pTabFinishedByInput');
+        const hidden = document.getElementById('pTabFinishedByAccount');
+        const clearBtn = document.getElementById('pTabFinishedByClear');
+        const dropdown = document.getElementById('pTabFinishedByDropdown');
+
+        if (!wrapper || !input || !hidden || !dropdown) return;
+
+        if (pTabFinishedBySelectInstance) {
+            return;
+        }
+
+        pTabFinishedBySelectInstance = setupMultiSelectUser({
+            wrapper,
+            box,
+            tagsContainer,
+            input,
+            hiddenInput: hidden,
+            clearBtn,
+            dropdown,
+            placeholder: '输入姓名/账号搜索 (留空不限)',
+            defaultSelectCurrentUser: false,
+            onChange: null
+        });
     }
 
     // 实时查询所有项目列表并初始化可搜索下拉组件
@@ -932,17 +1835,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 const filterClear = document.getElementById('filterProjectClear');
                 const filterDropdown = document.getElementById('filterProjectDropdown');
 
-                if (filterWrapper && filterInput && filterHidden && filterDropdown) {
-                    const currentVal = filterHidden.value;
-                    filterProjectSelectInstance = setupSearchableProjectSelect({
+                const filterBox = document.getElementById('filterProjectBox');
+                const filterTags = document.getElementById('filterProjectTags');
+
+                if (filterProjectSelectInstance) {
+                    filterProjectSelectInstance.updateItems(cachedProjects);
+                } else if (filterWrapper && filterInput && filterHidden && filterDropdown) {
+                    filterProjectSelectInstance = setupMultiSelectProject({
                         wrapper: filterWrapper,
+                        box: filterBox,
+                        tagsContainer: filterTags,
                         input: filterInput,
                         hiddenInput: filterHidden,
                         clearBtn: filterClear,
                         dropdown: filterDropdown,
                         items: cachedProjects,
-                        includeAll: true,
-                        defaultId: currentVal || '',
                         placeholder: '输入名称/ID搜索项目 (全部)'
                     });
                 }
@@ -950,6 +1857,36 @@ document.addEventListener('DOMContentLoaded', () => {
                 // 2. 如果当前批量修改选的是项目，也刷新动态输入框为可搜索选择器
                 if (batchFieldSelect && batchFieldSelect.value === 'project') {
                     renderDynamicValueInput('project');
+                }
+
+                // 3. 初始化项目全量任务独立 Tab 的多选项目下拉组件
+                const pTabWrapper = document.getElementById('pTabProjectWrapper');
+                const pTabBox = document.getElementById('pTabProjectBox');
+                const pTabTags = document.getElementById('pTabProjectTags');
+                const pTabInput = document.getElementById('pTabProjectInput');
+                const pTabHidden = document.getElementById('pTabProjectId');
+                const pTabClear = document.getElementById('pTabProjectClear');
+                const pTabDropdown = document.getElementById('pTabProjectDropdown');
+
+                if (pTabProjectSelectInstance) {
+                    pTabProjectSelectInstance.updateItems(cachedProjects);
+                } else if (pTabWrapper && pTabInput && pTabHidden && pTabDropdown) {
+                    pTabProjectSelectInstance = setupMultiSelectProject({
+                        wrapper: pTabWrapper,
+                        box: pTabBox,
+                        tagsContainer: pTabTags,
+                        input: pTabInput,
+                        hiddenInput: pTabHidden,
+                        clearBtn: pTabClear,
+                        dropdown: pTabDropdown,
+                        items: cachedProjects,
+                        placeholder: '输入名称/ID搜索项目 (可多选)'
+                    });
+                }
+
+                // 4. 如果项目全量任务Tab当前批量修改选的是项目，也刷新动态输入框为可搜索选择器
+                if (typeof pTabBatchFieldSelect !== 'undefined' && pTabBatchFieldSelect && pTabBatchFieldSelect.value === 'project') {
+                    renderPTabDynamicValueInput('project');
                 }
             }
         } catch (e) {
@@ -974,6 +1911,701 @@ document.addEventListener('DOMContentLoaded', () => {
             isUsersLoading = false;
         }
         return cachedUsers;
+    }
+
+    // ==========================================
+    // 团队分组与成员管理 (Group & Members Logic)
+    // ==========================================
+    let cachedGroups = [];
+    let activeGroupId = null;
+    let editingGroupMembers = [];
+
+    // 候选待添加成员映射表 (account -> { account, realname })
+    let pendingAddCandidateMap = new Map();
+    let gmUserSearchTimer = null;
+    let isGmUserComposing = false;
+
+    const userGroupSelect = document.getElementById('userGroupSelect');
+    const pTabGroupSelect = document.getElementById('pTabGroupSelect');
+    const groupManageModal = document.getElementById('groupManageModal');
+    const groupManageModalCloseBtn = document.getElementById('groupManageModalCloseBtn');
+    const groupManageModalDoneBtn = document.getElementById('groupManageModalDoneBtn');
+    const btnTopManageGroups = document.getElementById('btnTopManageGroups');
+    const btnManageGroups = document.getElementById('btnManageGroups');
+    const btnPTabManageGroups = document.getElementById('btnPTabManageGroups');
+
+    const groupListContainer = document.getElementById('groupListContainer');
+    const btnAddNewGroup = document.getElementById('btnAddNewGroup');
+    const groupEmptyNotice = document.getElementById('groupEmptyNotice');
+    const groupEditorPanel = document.getElementById('groupEditorPanel');
+
+    const gmGroupName = document.getElementById('gmGroupName');
+    const gmMemberCount = document.getElementById('gmMemberCount');
+    const gmMemberTagsContainer = document.getElementById('gmMemberTagsContainer');
+
+    // 可搜索多选添加成员组件
+    const gmAddUserWrapper = document.getElementById('gmAddUserWrapper');
+    const gmAddUserInput = document.getElementById('gmAddUserInput');
+    const gmAddUserClear = document.getElementById('gmAddUserClear');
+    const gmAddUserArrow = document.getElementById('gmAddUserArrow');
+    const gmAddUserDropdown = document.getElementById('gmAddUserDropdown');
+    const gmCandidateHeaderCount = document.getElementById('gmCandidateHeaderCount');
+    const btnGmCandidateSelectAll = document.getElementById('btnGmCandidateSelectAll');
+    const btnGmCandidateDeselectAll = document.getElementById('btnGmCandidateDeselectAll');
+    const gmCandidateList = document.getElementById('gmCandidateList');
+    const btnGmAddMember = document.getElementById('btnGmAddMember');
+    const btnGmAddCount = document.getElementById('btnGmAddCount');
+    const gmPendingBar = document.getElementById('gmPendingBar');
+    const gmPendingTags = document.getElementById('gmPendingTags');
+    const btnGmPendingClear = document.getElementById('btnGmPendingClear');
+
+    const btnDeleteCurrentGroup = document.getElementById('btnDeleteCurrentGroup');
+    const btnSaveCurrentGroup = document.getElementById('btnSaveCurrentGroup');
+
+    async function loadGroups() {
+        try {
+            const res = await fetch(apiUrl('/api/groups'));
+            const data = await res.json();
+            if (data.success && Array.isArray(data.groups)) {
+                cachedGroups = data.groups;
+                renderGroupSelects();
+            }
+        } catch (e) {
+            console.error('加载团队分组失败:', e);
+        }
+    }
+
+    function renderGroupSelects() {
+        const optionsHtml = '<option value="">👥 选择团队分组...</option>' +
+            cachedGroups.map(g => `<option value="${g.id}">👥 ${escapeHtml(g.name)} (${(g.members || []).length}人)</option>`).join('');
+
+        if (userGroupSelect) userGroupSelect.innerHTML = optionsHtml;
+        if (pTabGroupSelect) pTabGroupSelect.innerHTML = optionsHtml;
+    }
+
+    if (userGroupSelect) {
+        userGroupSelect.addEventListener('change', (e) => {
+            const gid = e.target.value;
+            if (!gid) return;
+            const grp = cachedGroups.find(g => g.id === gid);
+            if (grp && filterUserSelectInstance) {
+                filterUserSelectInstance.setSelectedUsers(grp.members || []);
+            }
+        });
+    }
+
+    if (pTabGroupSelect) {
+        pTabGroupSelect.addEventListener('change', (e) => {
+            const gid = e.target.value;
+            if (!gid) return;
+            const grp = cachedGroups.find(g => g.id === gid);
+            if (grp && pTabFinishedBySelectInstance) {
+                pTabFinishedBySelectInstance.setSelectedUsers(grp.members || []);
+            }
+        });
+    }
+
+    function renderGroupModalList() {
+        if (!groupListContainer) return;
+        if (!cachedGroups || cachedGroups.length === 0) {
+            groupListContainer.innerHTML = '<div style="text-align: center; color: #94a3b8; padding: 24px 8px; font-size: 12px;">暂无分组<br>点击上方“➕ 新增”</div>';
+            return;
+        }
+        let html = '';
+        cachedGroups.forEach(g => {
+            const count = (g.members || []).length;
+            const isActive = g.id === activeGroupId;
+            html += `
+                <div class="group-list-item ${isActive ? 'active' : ''}" data-id="${g.id}">
+                    <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px;" title="${escapeHtml(g.name)}">👥 ${escapeHtml(g.name)}</span>
+                    <span class="group-item-badge">${count}人</span>
+                </div>
+            `;
+        });
+        groupListContainer.innerHTML = html;
+    }
+
+    function showEmptyGroupEditor() {
+        activeGroupId = null;
+        editingGroupMembers = [];
+        if (groupEmptyNotice) groupEmptyNotice.style.display = 'block';
+        if (groupEditorPanel) groupEditorPanel.style.display = 'none';
+    }
+
+    function renderMemberTags() {
+        if (!gmMemberTagsContainer) return;
+        if (gmMemberCount) gmMemberCount.textContent = editingGroupMembers.length;
+
+        if (editingGroupMembers.length === 0) {
+            gmMemberTagsContainer.innerHTML = '<span style="color: #94a3b8; font-size: 12px; margin: auto;">该分组暂无成员，请在下方选择用户添加</span>';
+            return;
+        }
+
+        let html = '';
+        editingGroupMembers.forEach(m => {
+            html += `
+                <span class="group-member-tag">
+                    <span>${escapeHtml(m.realname || m.account)} (${escapeHtml(m.account)})</span>
+                    <span class="group-member-remove" data-account="${escapeHtml(m.account)}" title="移除此成员">&times;</span>
+                </span>
+            `;
+        });
+        gmMemberTagsContainer.innerHTML = html;
+    }
+
+    function highlightGmMatch(text, keyword) {
+        if (!keyword || !text) return escapeHtml(text || '');
+        const escapedText = escapeHtml(text);
+        const lowerText = escapedText.toLowerCase();
+        const lowerKey = keyword.toLowerCase();
+        const idx = lowerText.indexOf(lowerKey);
+        if (idx === -1) return escapedText;
+        const before = escapedText.substring(0, idx);
+        const match = escapedText.substring(idx, idx + keyword.length);
+        const after = escapedText.substring(idx + keyword.length);
+        return `${before}<span class="item-highlight">${match}</span>${after}`;
+    }
+
+    function renderGmPendingBar() {
+        const count = pendingAddCandidateMap.size;
+        if (btnGmAddCount) btnGmAddCount.textContent = count;
+        if (gmCandidateHeaderCount) gmCandidateHeaderCount.textContent = count;
+
+        if (!gmPendingBar || !gmPendingTags) return;
+        if (count === 0) {
+            gmPendingBar.style.display = 'none';
+            gmPendingTags.innerHTML = '';
+            return;
+        }
+        gmPendingBar.style.display = 'flex';
+        let html = '';
+        pendingAddCandidateMap.forEach((u, acc) => {
+            html += `
+                <span class="gm-pending-tag" data-account="${escapeHtml(acc)}">
+                    <span>${escapeHtml(u.realname || acc)}</span>
+                    <span class="gm-pending-tag-remove" data-account="${escapeHtml(acc)}" title="取消勾选">&times;</span>
+                </span>
+            `;
+        });
+        gmPendingTags.innerHTML = html;
+    }
+
+    function renderGmCandidateList(keyword = '') {
+        if (!gmCandidateList) return;
+        const kw = keyword.trim().toLowerCase();
+
+        const existingAccounts = new Set(
+            editingGroupMembers.map(m => String(m.account).toLowerCase())
+        );
+
+        let matched = cachedUsers.filter(u => {
+            if (!kw) return true;
+            const acc = String(u.account || '').toLowerCase();
+            const name = String(u.realname || '').toLowerCase();
+            return acc.includes(kw) || name.includes(kw);
+        });
+
+        if (cachedUsers.length === 0) {
+            gmCandidateList.innerHTML = `<div class="searchable-select-empty" style="color: #2563eb;">⏳ 正在加载用户库...</div>`;
+            return;
+        }
+
+        if (matched.length === 0) {
+            gmCandidateList.innerHTML = `<div class="searchable-select-empty">未找到匹配「${escapeHtml(keyword)}」的用户</div>`;
+            return;
+        }
+
+        matched.sort((a, b) => {
+            const aIn = existingAccounts.has(String(a.account).toLowerCase());
+            const bIn = existingAccounts.has(String(b.account).toLowerCase());
+            if (aIn !== bIn) return aIn ? 1 : -1;
+
+            const aChecked = pendingAddCandidateMap.has(String(a.account));
+            const bChecked = pendingAddCandidateMap.has(String(b.account));
+            if (aChecked !== bChecked) return aChecked ? -1 : 1;
+
+            return (a.realname || a.account).localeCompare(b.realname || b.account, 'zh');
+        });
+
+        const displayList = matched.slice(0, 150);
+
+        let html = '';
+        displayList.forEach(u => {
+            const acc = String(u.account);
+            const name = u.realname || acc;
+            const isInGroup = existingAccounts.has(acc.toLowerCase());
+            const isChecked = pendingAddCandidateMap.has(acc);
+
+            if (isInGroup) {
+                html += `
+                    <div class="searchable-select-item is-in-group" data-account="${escapeHtml(acc)}" title="该用户已是当前组成员">
+                        <span class="item-checkbox" style="opacity: 0.3;">-</span>
+                        <span class="item-id-badge">@${escapeHtml(acc)}</span>
+                        <span class="item-name">${escapeHtml(name)}</span>
+                        <span class="in-group-badge">✓ 已在组内</span>
+                    </div>
+                `;
+            } else {
+                html += `
+                    <div class="searchable-select-item ${isChecked ? 'is-selected' : ''}" data-account="${escapeHtml(acc)}" data-realname="${escapeHtml(name)}">
+                        <span class="item-checkbox">${isChecked ? '✓' : ''}</span>
+                        <span class="item-id-badge" style="background: #eff6ff; color: #2563eb; font-weight: 600;">@${highlightGmMatch(acc, keyword)}</span>
+                        <span class="item-name">${highlightGmMatch(name, keyword)}</span>
+                    </div>
+                `;
+            }
+        });
+
+        if (matched.length > 150) {
+            html += `<div class="searchable-select-empty" style="font-size: 11px; color: #94a3b8;">还有 ${matched.length - 150} 位候选人，请输入更精确的关键字</div>`;
+        }
+
+        gmCandidateList.innerHTML = html;
+    }
+
+    function openGmDropdown() {
+        if (!gmAddUserWrapper || !gmAddUserDropdown) return;
+        gmAddUserWrapper.classList.add('is-open');
+        gmAddUserDropdown.style.display = 'flex';
+        renderGmCandidateList(gmAddUserInput ? gmAddUserInput.value : '');
+    }
+
+    function closeGmDropdown() {
+        if (!gmAddUserWrapper || !gmAddUserDropdown) return;
+        gmAddUserWrapper.classList.remove('is-open');
+        gmAddUserDropdown.style.display = 'none';
+    }
+
+    function toggleGmDropdown() {
+        if (gmAddUserWrapper && gmAddUserWrapper.classList.contains('is-open')) {
+            closeGmDropdown();
+        } else {
+            openGmDropdown();
+            if (gmAddUserInput) gmAddUserInput.focus();
+        }
+    }
+
+    function selectGroupForEdit(groupId) {
+        const grp = cachedGroups.find(g => g.id === groupId);
+        if (!grp) {
+            showEmptyGroupEditor();
+            return;
+        }
+        activeGroupId = grp.id;
+        editingGroupMembers = (grp.members || []).map(m => ({ account: m.account, realname: m.realname || m.account }));
+
+        pendingAddCandidateMap.clear();
+        if (gmAddUserInput) gmAddUserInput.value = '';
+        if (gmAddUserClear) gmAddUserClear.style.display = 'none';
+        renderGmPendingBar();
+        closeGmDropdown();
+
+        if (groupEmptyNotice) groupEmptyNotice.style.display = 'none';
+        if (groupEditorPanel) groupEditorPanel.style.display = 'block';
+
+        if (gmGroupName) gmGroupName.value = grp.name || '';
+        renderMemberTags();
+        renderGroupModalList();
+    }
+
+    async function openGroupManageModal(selectGroupId = null) {
+        if (!groupManageModal) return;
+        groupManageModal.style.display = 'flex';
+
+        pendingAddCandidateMap.clear();
+        if (gmAddUserInput) gmAddUserInput.value = '';
+        if (gmAddUserClear) gmAddUserClear.style.display = 'none';
+        renderGmPendingBar();
+        closeGmDropdown();
+
+        // 确保用户列表已加载
+        if (cachedUsers.length === 0) {
+            await loadUsers();
+        }
+
+        renderGroupModalList();
+
+        if (selectGroupId && cachedGroups.some(g => g.id === selectGroupId)) {
+            selectGroupForEdit(selectGroupId);
+        } else if (cachedGroups.length > 0) {
+            selectGroupForEdit(cachedGroups[0].id);
+        } else {
+            showEmptyGroupEditor();
+        }
+    }
+
+    function closeGroupManageModal() {
+        if (groupManageModal) groupManageModal.style.display = 'none';
+        pendingAddCandidateMap.clear();
+        if (gmAddUserInput) gmAddUserInput.value = '';
+        if (gmAddUserClear) gmAddUserClear.style.display = 'none';
+        renderGmPendingBar();
+        closeGmDropdown();
+        // 清理未保存的临时草稿分组
+        cachedGroups = cachedGroups.filter(g => !String(g.id).startsWith('temp_'));
+        renderGroupSelects();
+    }
+
+    function addNewGroup() {
+        const tempId = 'temp_' + Date.now();
+        const newGrp = {
+            id: tempId,
+            name: '新建分组',
+            members: []
+        };
+        cachedGroups.unshift(newGrp);
+        activeGroupId = tempId;
+        editingGroupMembers = [];
+
+        pendingAddCandidateMap.clear();
+        if (gmAddUserInput) gmAddUserInput.value = '';
+        if (gmAddUserClear) gmAddUserClear.style.display = 'none';
+        renderGmPendingBar();
+        closeGmDropdown();
+
+        if (groupEmptyNotice) groupEmptyNotice.style.display = 'none';
+        if (groupEditorPanel) groupEditorPanel.style.display = 'block';
+        if (gmGroupName) {
+            gmGroupName.value = newGrp.name;
+            gmGroupName.focus();
+            gmGroupName.select();
+        }
+        renderMemberTags();
+        renderGroupModalList();
+    }
+
+    function addMemberToGroup() {
+        if (pendingAddCandidateMap.size === 0) {
+            const kw = gmAddUserInput ? gmAddUserInput.value.trim().toLowerCase() : '';
+            if (kw) {
+                const existingAccounts = new Set(editingGroupMembers.map(m => String(m.account).toLowerCase()));
+                const candidateMatches = cachedUsers.filter(u => {
+                    const acc = String(u.account || '').toLowerCase();
+                    const name = String(u.realname || '').toLowerCase();
+                    return (acc.includes(kw) || name.includes(kw)) && !existingAccounts.has(acc);
+                });
+                if (candidateMatches.length === 1) {
+                    const single = candidateMatches[0];
+                    pendingAddCandidateMap.set(String(single.account), {
+                        account: String(single.account),
+                        realname: single.realname || single.account
+                    });
+                } else if (candidateMatches.length > 1) {
+                    alert(`搜索结果共有 ${candidateMatches.length} 位候选成员，请在列表中勾选要加入的人员！`);
+                    if (gmAddUserInput) {
+                        gmAddUserInput.focus();
+                        openGmDropdown();
+                    }
+                    return;
+                } else {
+                    alert('未找到可加入当前分组的匹配成员！');
+                    if (gmAddUserInput) {
+                        gmAddUserInput.focus();
+                        openGmDropdown();
+                    }
+                    return;
+                }
+            } else {
+                alert('请在候选列表中勾选要加入分组的成员！');
+                if (gmAddUserInput) {
+                    gmAddUserInput.focus();
+                    openGmDropdown();
+                }
+                return;
+            }
+        }
+
+        const existingAccounts = new Set(editingGroupMembers.map(m => String(m.account).toLowerCase()));
+        let addedCount = 0;
+        pendingAddCandidateMap.forEach((u, acc) => {
+            if (!existingAccounts.has(acc.toLowerCase())) {
+                editingGroupMembers.push({ account: acc, realname: u.realname || acc });
+                addedCount++;
+            }
+        });
+
+        pendingAddCandidateMap.clear();
+        if (gmAddUserInput) gmAddUserInput.value = '';
+        if (gmAddUserClear) gmAddUserClear.style.display = 'none';
+        renderGmPendingBar();
+        renderMemberTags();
+        renderGroupModalList();
+
+        if (gmAddUserWrapper && gmAddUserWrapper.classList.contains('is-open')) {
+            renderGmCandidateList('');
+        }
+    }
+
+    async function saveCurrentGroup() {
+        const name = gmGroupName ? gmGroupName.value.trim() : '';
+        if (!name) {
+            alert('分组名称不能为空！');
+            if (gmGroupName) gmGroupName.focus();
+            return;
+        }
+
+        showLoading('正在保存分组配置...');
+        try {
+            const isTemp = !activeGroupId || String(activeGroupId).startsWith('temp_');
+            const res = await fetch(apiUrl('/api/groups'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: isTemp ? '' : activeGroupId,
+                    name: name,
+                    members: editingGroupMembers
+                })
+            });
+            const data = await res.json();
+            hideLoading();
+            if (data.success) {
+                cachedGroups = data.groups || [];
+                activeGroupId = data.group_id;
+                renderGroupSelects();
+                renderGroupModalList();
+                selectGroupForEdit(activeGroupId);
+                alert('分组保存成功！');
+            } else {
+                alert('保存失败: ' + (data.message || '未知错误'));
+            }
+        } catch (e) {
+            hideLoading();
+            alert('保存分组网络请求异常: ' + e);
+        }
+    }
+
+    async function deleteCurrentGroup() {
+        if (!activeGroupId) return;
+        if (String(activeGroupId).startsWith('temp_')) {
+            cachedGroups = cachedGroups.filter(g => g.id !== activeGroupId);
+            if (cachedGroups.length > 0) {
+                selectGroupForEdit(cachedGroups[0].id);
+            } else {
+                showEmptyGroupEditor();
+            }
+            renderGroupModalList();
+            return;
+        }
+
+        const name = gmGroupName ? gmGroupName.value : '此分组';
+        if (!confirm(`确定要删除分组「${name}」吗？`)) return;
+
+        showLoading('正在删除分组...');
+        try {
+            const res = await fetch(apiUrl(`/api/groups/${activeGroupId}`), {
+                method: 'DELETE'
+            });
+            const data = await res.json();
+            hideLoading();
+            if (data.success) {
+                cachedGroups = data.groups || [];
+                renderGroupSelects();
+                if (cachedGroups.length > 0) {
+                    selectGroupForEdit(cachedGroups[0].id);
+                } else {
+                    showEmptyGroupEditor();
+                }
+                renderGroupModalList();
+                alert('分组已删除！');
+            } else {
+                alert('删除失败: ' + (data.message || '未知错误'));
+            }
+        } catch (e) {
+            hideLoading();
+            alert('删除分组网络请求异常: ' + e);
+        }
+    }
+
+    // 绑定分组弹窗内部事件
+    if (btnTopManageGroups) btnTopManageGroups.onclick = () => openGroupManageModal();
+    if (btnManageGroups) btnManageGroups.onclick = () => openGroupManageModal(userGroupSelect ? userGroupSelect.value : null);
+    if (btnPTabManageGroups) btnPTabManageGroups.onclick = () => openGroupManageModal(pTabGroupSelect ? pTabGroupSelect.value : null);
+    if (groupManageModalCloseBtn) groupManageModalCloseBtn.onclick = closeGroupManageModal;
+    if (groupManageModalDoneBtn) groupManageModalDoneBtn.onclick = closeGroupManageModal;
+    if (btnAddNewGroup) btnAddNewGroup.onclick = addNewGroup;
+    if (btnGmAddMember) btnGmAddMember.onclick = addMemberToGroup;
+    if (btnSaveCurrentGroup) btnSaveCurrentGroup.onclick = saveCurrentGroup;
+    if (btnDeleteCurrentGroup) btnDeleteCurrentGroup.onclick = deleteCurrentGroup;
+
+    // 可搜索多选添加成员事件绑定
+    if (gmAddUserInput) {
+        gmAddUserInput.addEventListener('focus', () => {
+            openGmDropdown();
+        });
+
+        gmAddUserInput.addEventListener('compositionstart', () => {
+            isGmUserComposing = true;
+        });
+
+        gmAddUserInput.addEventListener('compositionend', () => {
+            isGmUserComposing = false;
+            if (gmAddUserClear) {
+                gmAddUserClear.style.display = gmAddUserInput.value ? 'block' : 'none';
+            }
+            if (gmUserSearchTimer) clearTimeout(gmUserSearchTimer);
+            gmUserSearchTimer = setTimeout(() => {
+                renderGmCandidateList(gmAddUserInput.value);
+            }, 80);
+        });
+
+        gmAddUserInput.addEventListener('input', () => {
+            if (!gmAddUserWrapper.classList.contains('is-open')) {
+                openGmDropdown();
+            }
+            if (gmAddUserClear) {
+                gmAddUserClear.style.display = gmAddUserInput.value ? 'block' : 'none';
+            }
+            if (isGmUserComposing) return;
+            if (gmUserSearchTimer) clearTimeout(gmUserSearchTimer);
+            gmUserSearchTimer = setTimeout(() => {
+                renderGmCandidateList(gmAddUserInput.value);
+            }, 80);
+        });
+
+        gmAddUserInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeGmDropdown();
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                addMemberToGroup();
+            }
+        });
+    }
+
+    if (gmAddUserClear) {
+        gmAddUserClear.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (gmAddUserInput) {
+                gmAddUserInput.value = '';
+                gmAddUserInput.focus();
+            }
+            gmAddUserClear.style.display = 'none';
+            renderGmCandidateList('');
+        });
+    }
+
+    if (gmAddUserArrow) {
+        gmAddUserArrow.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleGmDropdown();
+        });
+    }
+
+    if (gmCandidateList) {
+        gmCandidateList.addEventListener('mousedown', (e) => {
+            const itemEl = e.target.closest('.searchable-select-item');
+            if (!itemEl || itemEl.classList.contains('is-in-group')) return;
+            e.preventDefault();
+
+            const acc = itemEl.getAttribute('data-account');
+            const realname = itemEl.getAttribute('data-realname') || acc;
+            if (!acc) return;
+
+            if (pendingAddCandidateMap.has(acc)) {
+                pendingAddCandidateMap.delete(acc);
+                itemEl.classList.remove('is-selected');
+                const cb = itemEl.querySelector('.item-checkbox');
+                if (cb) cb.textContent = '';
+            } else {
+                pendingAddCandidateMap.set(acc, { account: acc, realname: realname });
+                itemEl.classList.add('is-selected');
+                const cb = itemEl.querySelector('.item-checkbox');
+                if (cb) cb.textContent = '✓';
+            }
+
+            renderGmPendingBar();
+            if (gmAddUserInput) gmAddUserInput.focus();
+        });
+    }
+
+    if (btnGmCandidateSelectAll) {
+        btnGmCandidateSelectAll.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const kw = gmAddUserInput ? gmAddUserInput.value.trim().toLowerCase() : '';
+            const existingAccounts = new Set(
+                editingGroupMembers.map(m => String(m.account).toLowerCase())
+            );
+
+            cachedUsers.forEach(u => {
+                const acc = String(u.account || '');
+                const name = String(u.realname || '');
+                if (!acc || existingAccounts.has(acc.toLowerCase())) return;
+                if (kw && !acc.toLowerCase().includes(kw) && !name.toLowerCase().includes(kw)) return;
+
+                pendingAddCandidateMap.set(acc, { account: acc, realname: name || acc });
+            });
+
+            renderGmPendingBar();
+            renderGmCandidateList(gmAddUserInput ? gmAddUserInput.value : '');
+        });
+    }
+
+    if (btnGmCandidateDeselectAll) {
+        btnGmCandidateDeselectAll.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            pendingAddCandidateMap.clear();
+            renderGmPendingBar();
+            renderGmCandidateList(gmAddUserInput ? gmAddUserInput.value : '');
+        });
+    }
+
+    if (gmPendingTags) {
+        gmPendingTags.addEventListener('click', (e) => {
+            const removeBtn = e.target.closest('.gm-pending-tag-remove');
+            if (removeBtn) {
+                const acc = removeBtn.getAttribute('data-account');
+                if (acc && pendingAddCandidateMap.has(acc)) {
+                    pendingAddCandidateMap.delete(acc);
+                    renderGmPendingBar();
+                    if (gmAddUserWrapper && gmAddUserWrapper.classList.contains('is-open')) {
+                        renderGmCandidateList(gmAddUserInput ? gmAddUserInput.value : '');
+                    }
+                }
+            }
+        });
+    }
+
+    if (btnGmPendingClear) {
+        btnGmPendingClear.addEventListener('click', () => {
+            pendingAddCandidateMap.clear();
+            renderGmPendingBar();
+            if (gmAddUserWrapper && gmAddUserWrapper.classList.contains('is-open')) {
+                renderGmCandidateList(gmAddUserInput ? gmAddUserInput.value : '');
+            }
+        });
+    }
+
+    document.addEventListener('click', (e) => {
+        if (gmAddUserWrapper && !gmAddUserWrapper.contains(e.target) && !e.target.closest('#btnGmAddMember')) {
+            closeGmDropdown();
+        }
+    });
+
+    if (groupListContainer) {
+        groupListContainer.addEventListener('click', (e) => {
+            const item = e.target.closest('.group-list-item');
+            if (item) {
+                const gid = item.getAttribute('data-id');
+                if (gid) selectGroupForEdit(gid);
+            }
+        });
+    }
+
+    if (gmMemberTagsContainer) {
+        gmMemberTagsContainer.addEventListener('click', (e) => {
+            const removeBtn = e.target.closest('.group-member-remove');
+            if (removeBtn) {
+                const acc = removeBtn.getAttribute('data-account');
+                editingGroupMembers = editingGroupMembers.filter(m => String(m.account).toLowerCase() !== String(acc).toLowerCase());
+                renderMemberTags();
+                renderGroupModalList();
+                if (gmAddUserWrapper && gmAddUserWrapper.classList.contains('is-open')) {
+                    renderGmCandidateList(gmAddUserInput ? gmAddUserInput.value : '');
+                }
+            }
+        });
     }
 
     // 提交登录/切换
@@ -1361,18 +2993,18 @@ document.addEventListener('DOMContentLoaded', () => {
         let html = '';
         if (fieldName === 'name') {
             html = `
-                <select id="nameModeSelect" class="form-control" style="width: 125px;">
+                <select id="nameModeSelect" class="form-control" style="width: 115px;">
                     <option value="direct" selected>统一重命名</option>
                     <option value="prefix">添加前缀</option>
                     <option value="suffix">添加后缀</option>
                     <option value="replace">文本替换</option>
                 </select>
                 <div id="nameInputsContainer" style="display:inline-flex; align-items:center; gap:6px;">
-                    <input type="text" id="fieldValueInput" class="form-control" placeholder="输入统一的新任务名称" style="min-width: 220px; max-width: 320px;">
+                    <input type="text" id="fieldValueInput" class="form-control" placeholder="输入统一的新任务名称" style="width: 210px; max-width: 260px;">
                 </div>
-                <label class="checkbox-label" style="display:inline-flex; align-items:center; gap:5px; font-size:12px; color:#475569; cursor:pointer; user-select:none; margin-left:6px;" title="勾选后，任务描述将同步更新为与新任务名称一致">
+                <label class="checkbox-label" style="display:inline-flex; align-items:center; gap:4px; font-size:12px; color:#475569; cursor:pointer; user-select:none; margin-left:4px; white-space:nowrap;" title="勾选后，任务描述将同步更新为与新任务名称一致">
                     <input type="checkbox" id="syncDescCheckbox" checked>
-                    <span>同步将任务描述改成与名称一致</span>
+                    <span>同步修改描述</span>
                 </label>
             `;
         } else if (fieldName === 'assignedTo') {
@@ -1382,6 +3014,23 @@ document.addEventListener('DOMContentLoaded', () => {
                     <option value="${currentAccount}">指派给当前用户 (${userRealname.textContent || currentAccount})</option>
                     <option value="">未指派 (置空)</option>
                     <option value="__custom__">自定义输入其他账号 (搜索/下拉)...</option>
+                </select>
+                <div class="searchable-select-wrapper" id="customUserWrapper" style="display:none; min-width: 220px; max-width: 320px;">
+                    <input type="text" id="customUserInput" class="form-control searchable-select-input" placeholder="输入姓名/账号搜索用户..." autocomplete="off">
+                    <input type="hidden" id="customUserHidden" value="">
+                    <button type="button" class="searchable-select-clear" id="customUserClear" title="清除" style="display: none;">&times;</button>
+                    <span class="searchable-select-arrow">▼</span>
+                    <div class="searchable-select-dropdown" id="customUserDropdown" style="display: none;">
+                        <!-- 动态渲染用户列表 -->
+                    </div>
+                </div>
+            `;
+        } else if (fieldName === 'finishedBy') {
+            html = `
+                <select id="fieldValueInput" class="form-control" style="min-width: 170px;">
+                    <option value="${currentAccount}" selected>改为当前用户 (${userRealname.textContent || currentAccount})</option>
+                    <option value="__custom__">选择其他用户 (搜索/下拉)...</option>
+                    <option value="">置空 (无完成人)</option>
                 </select>
                 <div class="searchable-select-wrapper" id="customUserWrapper" style="display:none; min-width: 220px; max-width: 320px;">
                     <input type="text" id="customUserInput" class="form-control searchable-select-input" placeholder="输入姓名/账号搜索用户..." autocomplete="off">
@@ -1439,19 +3088,20 @@ document.addEventListener('DOMContentLoaded', () => {
         const nameModeSelect = document.getElementById('nameModeSelect');
         const nameInputsContainer = document.getElementById('nameInputsContainer');
         if (nameModeSelect && nameInputsContainer) {
-            nameModeSelect.addEventListener('change', () => {
+            nameModeSelect.addEventListener('change', (e) => {
+                e.stopPropagation();
                 const mode = nameModeSelect.value;
                 if (mode === 'direct') {
-                    nameInputsContainer.innerHTML = `<input type="text" id="fieldValueInput" class="form-control" placeholder="输入统一的新任务名称" style="min-width: 220px; max-width: 320px;">`;
+                    nameInputsContainer.innerHTML = `<input type="text" id="fieldValueInput" class="form-control" placeholder="输入统一的新任务名称" style="width: 210px; max-width: 260px;">`;
                 } else if (mode === 'prefix') {
-                    nameInputsContainer.innerHTML = `<input type="text" id="fieldValueInput" class="form-control" placeholder="输入前缀 (如 【2026】)" style="min-width: 190px;">`;
+                    nameInputsContainer.innerHTML = `<input type="text" id="fieldValueInput" class="form-control" placeholder="输入前缀 (如 【2026】)" style="width: 180px;">`;
                 } else if (mode === 'suffix') {
-                    nameInputsContainer.innerHTML = `<input type="text" id="fieldValueInput" class="form-control" placeholder="输入后缀 (如 -已评审)" style="min-width: 190px;">`;
+                    nameInputsContainer.innerHTML = `<input type="text" id="fieldValueInput" class="form-control" placeholder="输入后缀 (如 -已评审)" style="width: 180px;">`;
                 } else if (mode === 'replace') {
                     nameInputsContainer.innerHTML = `
-                        <input type="text" id="replaceFromInput" class="form-control" placeholder="要查找的词" style="width: 125px;">
+                        <input type="text" id="replaceFromInput" class="form-control" placeholder="原词" style="width: 100px;">
                         <span style="color:#64748b; font-weight:bold;">➔</span>
-                        <input type="text" id="fieldValueInput" class="form-control" placeholder="替换为新词" style="width: 125px;">
+                        <input type="text" id="fieldValueInput" class="form-control" placeholder="替换为新词 (留空则删除)" style="width: 140px;">
                     `;
                 }
             });
@@ -1504,27 +3154,33 @@ document.addEventListener('DOMContentLoaded', () => {
     // 初始化渲染一次字段输入
     renderDynamicValueInput(batchFieldSelect.value);
 
-    batchFieldSelect.addEventListener('change', () => {
+    batchFieldSelect.addEventListener('change', (e) => {
+        e.stopPropagation();
         renderDynamicValueInput(batchFieldSelect.value);
     });
 
     // 6. 模块二：自定义查询
     btnSearch.onclick = async () => {
-        const targetAcc = (document.getElementById('filterUserAccount')?.value || '').trim();
-        const userInputVal = (document.getElementById('filterUserInput')?.value || '').trim();
-        let targetRealname = '';
-        if (userInputVal) {
-            const m = userInputVal.match(/^([^()]+)/);
-            if (m) targetRealname = m[1].replace(/^我\s*[:：(（]?\s*/, '').replace(/[)）]/g, '').trim();
-        }
+        const selectedUsers = filterUserSelectInstance
+            ? filterUserSelectInstance.getSelectedUsers()
+            : [];
+        const selectedAccounts = selectedUsers.map(u => u.account).filter(Boolean);
+        const selectedRealnames = selectedUsers.map(u => u.realname || u.account).filter(Boolean);
+
+        const selectedProjectIds = filterProjectSelectInstance
+            ? filterProjectSelectInstance.getSelectedIds()
+            : (document.getElementById('filterProjectId')?.value || '').split(',').filter(Boolean);
 
         const params = {
-            target_account: targetAcc || currentAccount,
-            target_realname: targetRealname,
+            target_accounts: selectedAccounts,
+            target_account: selectedAccounts[0] || currentAccount,
+            target_realnames: selectedRealnames,
+            target_realname: selectedRealnames[0] || currentUserRealname || currentAccount,
             view_type: document.getElementById('filterViewType').value,
             year: document.getElementById('filterYear').value.trim(),
             status: document.getElementById('filterStatus').value,
-            project_id: document.getElementById('filterProjectId').value.trim(),
+            project_ids: selectedProjectIds,
+            project_id: selectedProjectIds[0] || '',
             keyword: document.getElementById('filterKeyword').value.trim()
         };
 
@@ -1555,6 +3211,566 @@ document.addEventListener('DOMContentLoaded', () => {
             queryTableBody.innerHTML = `<tr><td colspan="10" class="empty-cell" style="color:red;">网络异常: ${e}</td></tr>`;
         }
     };
+
+    // -------------------------------------------------------------
+    // 模块：项目全量任务检索 (独立功能 Tab)
+    // -------------------------------------------------------------
+    let currentProjectTasks = [];
+    let pTabSelectedTaskIds = new Set();
+
+    const btnSearchProjectTasks = document.getElementById('btnSearchProjectTasks');
+    const projectTasksTableBody = document.getElementById('projectTasksTableBody');
+    const checkAllProjectRows = document.getElementById('checkAllProjectRows');
+    const projectTasksBadge = document.getElementById('projectTasksBadge');
+    const projectTasksTotalBadge = document.getElementById('projectTasksTotalBadge');
+    const pTabSummaryBar = document.getElementById('pTabSummaryBar');
+
+    function updatePTabSelectedCount() {
+        const count = pTabSelectedTaskIds.size;
+        const selCountEl = document.getElementById('pTabSelectedCount');
+        if (selCountEl) {
+            selCountEl.textContent = count;
+        }
+        const summaryCountEl = document.getElementById('pTabSummarySelectedCount');
+        if (summaryCountEl) {
+            summaryCountEl.textContent = count;
+        }
+        if (checkAllProjectRows) {
+            const total = currentProjectTasks.length;
+            if (total === 0 || count === 0) {
+                checkAllProjectRows.checked = false;
+                checkAllProjectRows.indeterminate = false;
+            } else if (count === total) {
+                checkAllProjectRows.checked = true;
+                checkAllProjectRows.indeterminate = false;
+            } else {
+                checkAllProjectRows.checked = false;
+                checkAllProjectRows.indeterminate = true;
+            }
+        }
+    }
+
+    if (checkAllProjectRows) {
+        checkAllProjectRows.addEventListener('change', () => {
+            const isChecked = checkAllProjectRows.checked;
+            pTabSelectedTaskIds.clear();
+            if (isChecked) {
+                currentProjectTasks.forEach(t => pTabSelectedTaskIds.add(String(t.id)));
+            }
+            document.querySelectorAll('.ptab-task-checkbox').forEach(cb => {
+                cb.checked = isChecked;
+            });
+            updatePTabSelectedCount();
+        });
+    }
+
+    const btnPTabSelectAll = document.getElementById('btnPTabSelectAll');
+    const btnPTabDeselectAll = document.getElementById('btnPTabDeselectAll');
+    const pTabBatchFieldSelect = document.getElementById('pTabBatchFieldSelect');
+    const btnPTabExecuteBatchUpdate = document.getElementById('btnPTabExecuteBatchUpdate');
+
+    if (btnPTabSelectAll) {
+        btnPTabSelectAll.onclick = () => {
+            pTabSelectedTaskIds.clear();
+            currentProjectTasks.forEach(t => pTabSelectedTaskIds.add(String(t.id)));
+            document.querySelectorAll('.ptab-task-checkbox').forEach(cb => {
+                cb.checked = true;
+            });
+            updatePTabSelectedCount();
+        };
+    }
+
+    if (btnPTabDeselectAll) {
+        btnPTabDeselectAll.onclick = () => {
+            pTabSelectedTaskIds.clear();
+            document.querySelectorAll('.ptab-task-checkbox').forEach(cb => {
+                cb.checked = false;
+            });
+            updatePTabSelectedCount();
+        };
+    }
+
+    function renderPTabDynamicValueInput(fieldName) {
+        const container = document.getElementById('pTabDynamicValueContainer');
+        if (!container) return;
+        let html = '';
+        if (fieldName === 'name') {
+            html = `
+                <select id="pTabNameModeSelect" class="form-control" style="width: 115px;">
+                    <option value="direct" selected>统一重命名</option>
+                    <option value="prefix">添加前缀</option>
+                    <option value="suffix">添加后缀</option>
+                    <option value="replace">文本替换</option>
+                </select>
+                <div id="pTabNameInputsContainer" style="display:inline-flex; align-items:center; gap:6px;">
+                    <input type="text" id="pTabFieldValueInput" class="form-control" placeholder="输入统一的新任务名称" style="width: 210px; max-width: 260px;">
+                </div>
+                <label class="checkbox-label" style="display:inline-flex; align-items:center; gap:4px; font-size:12px; color:#475569; cursor:pointer; user-select:none; margin-left:4px; white-space:nowrap;" title="勾选后，任务描述将同步更新为与新任务名称一致">
+                    <input type="checkbox" id="pTabSyncDescCheckbox" checked>
+                    <span>同步修改描述</span>
+                </label>
+            `;
+        } else if (fieldName === 'assignedTo') {
+            html = `
+                <select id="pTabFieldValueInput" class="form-control" style="min-width: 170px;">
+                    <option value="closed" selected>Closed (已关闭锁定)</option>
+                    <option value="${currentAccount}">指派给当前用户 (${currentUserRealname || currentAccount})</option>
+                    <option value="">未指派 (置空)</option>
+                    <option value="__custom__">自定义输入其他账号 (搜索/下拉)...</option>
+                </select>
+                <div class="searchable-select-wrapper" id="pTabCustomUserWrapper" style="display:none; min-width: 220px; max-width: 320px;">
+                    <input type="text" id="pTabCustomUserInput" class="form-control searchable-select-input" placeholder="输入姓名/账号搜索用户..." autocomplete="off">
+                    <input type="hidden" id="pTabCustomUserHidden" value="">
+                    <button type="button" class="searchable-select-clear" id="pTabCustomUserClear" title="清除" style="display: none;">&times;</button>
+                    <span class="searchable-select-arrow">▼</span>
+                    <div class="searchable-select-dropdown" id="pTabCustomUserDropdown" style="display: none;">
+                        <!-- 动态渲染用户列表 -->
+                    </div>
+                </div>
+            `;
+        } else if (fieldName === 'finishedBy') {
+            html = `
+                <select id="pTabFieldValueInput" class="form-control" style="min-width: 170px;">
+                    <option value="${currentAccount}" selected>改为当前用户 (${currentUserRealname || currentAccount})</option>
+                    <option value="__custom__">选择其他用户 (搜索/下拉)...</option>
+                    <option value="">置空 (无完成人)</option>
+                </select>
+                <div class="searchable-select-wrapper" id="pTabCustomUserWrapper" style="display:none; min-width: 220px; max-width: 320px;">
+                    <input type="text" id="pTabCustomUserInput" class="form-control searchable-select-input" placeholder="输入姓名/账号搜索用户..." autocomplete="off">
+                    <input type="hidden" id="pTabCustomUserHidden" value="">
+                    <button type="button" class="searchable-select-clear" id="pTabCustomUserClear" title="清除" style="display: none;">&times;</button>
+                    <span class="searchable-select-arrow">▼</span>
+                    <div class="searchable-select-dropdown" id="pTabCustomUserDropdown" style="display: none;">
+                        <!-- 动态渲染用户列表 -->
+                    </div>
+                </div>
+            `;
+        } else if (fieldName === 'status') {
+            html = `
+                <select id="pTabFieldValueInput" class="form-control" style="min-width: 150px;">
+                    <option value="wait">未开始 (wait)</option>
+                    <option value="doing">进行中 (doing)</option>
+                    <option value="done">已完成 (done)</option>
+                    <option value="closed" selected>已关闭 (closed)</option>
+                    <option value="pause">已暂停 (pause)</option>
+                </select>
+            `;
+        } else if (fieldName === 'project') {
+            const firstProj = (cachedProjects && cachedProjects.length > 0) ? cachedProjects[0] : { id: '183', name: '互联网应用V1.1版本迭代' };
+            html = `
+                <div class="searchable-select-wrapper" id="pTabBatchProjectWrapper" style="min-width: 240px; max-width: 340px;">
+                    <input type="text" id="pTabBatchProjectInput" class="form-control searchable-select-input" placeholder="输入关键字搜索目标项目..." autocomplete="off">
+                    <input type="hidden" id="pTabFieldValueInput" value="${firstProj.id}">
+                    <button type="button" class="searchable-select-clear" id="pTabBatchProjectClear" title="清除" style="display: none;">&times;</button>
+                    <span class="searchable-select-arrow">▼</span>
+                    <div class="searchable-select-dropdown" id="pTabBatchProjectDropdown" style="display: none;">
+                        <!-- 动态渲染项目列表 -->
+                    </div>
+                </div>
+            `;
+        } else if (fieldName === 'execution') {
+            html = `<input type="number" id="pTabFieldValueInput" class="form-control" placeholder="目标执行/迭代 ID (如 203)" style="width:180px;">`;
+        } else if (fieldName === 'estimate') {
+            html = `<input type="number" step="0.5" id="pTabFieldValueInput" class="form-control" placeholder="工时(小时，如 2.0)" style="width:150px;">`;
+        } else if (fieldName === 'pri') {
+            html = `
+                <select id="pTabFieldValueInput" class="form-control" style="min-width: 120px;">
+                    <option value="1">1 (最高)</option>
+                    <option value="2">2 (高)</option>
+                    <option value="3" selected>3 (中)</option>
+                    <option value="4">4 (低)</option>
+                </select>
+            `;
+        } else if (fieldName === 'deadline') {
+            html = `<input type="date" id="pTabFieldValueInput" class="form-control" style="width:160px;">`;
+        }
+
+        container.innerHTML = html;
+
+        // 任务名称模式切换联动
+        const nameModeSelect = document.getElementById('pTabNameModeSelect');
+        const nameInputsContainer = document.getElementById('pTabNameInputsContainer');
+        if (nameModeSelect && nameInputsContainer) {
+            nameModeSelect.addEventListener('change', (e) => {
+                e.stopPropagation();
+                const mode = nameModeSelect.value;
+                if (mode === 'direct') {
+                    nameInputsContainer.innerHTML = `<input type="text" id="pTabFieldValueInput" class="form-control" placeholder="输入统一的新任务名称" style="width: 210px; max-width: 260px;">`;
+                } else if (mode === 'prefix') {
+                    nameInputsContainer.innerHTML = `<input type="text" id="pTabFieldValueInput" class="form-control" placeholder="输入前缀 (如 【2026】)" style="width: 180px;">`;
+                } else if (mode === 'suffix') {
+                    nameInputsContainer.innerHTML = `<input type="text" id="pTabFieldValueInput" class="form-control" placeholder="输入后缀 (如 -已评审)" style="width: 180px;">`;
+                } else if (mode === 'replace') {
+                    nameInputsContainer.innerHTML = `
+                        <input type="text" id="pTabReplaceFromInput" class="form-control" placeholder="原词" style="width: 100px;">
+                        <span style="color:#64748b; font-weight:bold;">➔</span>
+                        <input type="text" id="pTabFieldValueInput" class="form-control" placeholder="替换为新词 (留空则删除)" style="width: 140px;">
+                    `;
+                }
+            });
+        }
+
+        // 如果是所属项目字段，初始化目标项目可搜索下拉选择组件
+        if (fieldName === 'project') {
+            const firstProj = (cachedProjects && cachedProjects.length > 0) ? cachedProjects[0] : null;
+            setupSearchableProjectSelect({
+                wrapper: document.getElementById('pTabBatchProjectWrapper'),
+                input: document.getElementById('pTabBatchProjectInput'),
+                hiddenInput: document.getElementById('pTabFieldValueInput'),
+                clearBtn: document.getElementById('pTabBatchProjectClear'),
+                dropdown: document.getElementById('pTabBatchProjectDropdown'),
+                items: cachedProjects,
+                includeAll: false,
+                defaultId: firstProj ? firstProj.id : '',
+                placeholder: '输入关键字搜索目标项目...'
+            });
+        }
+
+        // 如果是指派给，支持自定义切换为支持搜索的下拉选择框
+        const valSelect = document.getElementById('pTabFieldValueInput');
+        const customUserWrapper = document.getElementById('pTabCustomUserWrapper');
+        if (valSelect && customUserWrapper && valSelect.tagName === 'SELECT') {
+            valSelect.addEventListener('change', () => {
+                if (valSelect.value === '__custom__') {
+                    customUserWrapper.style.display = 'inline-block';
+                    loadUsers().then(() => {
+                        setupSearchableUserSelect({
+                            wrapper: customUserWrapper,
+                            input: document.getElementById('pTabCustomUserInput'),
+                            hiddenInput: document.getElementById('pTabCustomUserHidden'),
+                            clearBtn: document.getElementById('pTabCustomUserClear'),
+                            dropdown: document.getElementById('pTabCustomUserDropdown'),
+                            placeholder: '输入姓名/账号搜索用户...'
+                        });
+                        const customUserInput = document.getElementById('pTabCustomUserInput');
+                        if (customUserInput) customUserInput.focus();
+                    });
+                } else {
+                    customUserWrapper.style.display = 'none';
+                    const customUserHidden = document.getElementById('pTabCustomUserHidden');
+                    if (customUserHidden) customUserHidden.value = '';
+                }
+            });
+        }
+    }
+
+    if (pTabBatchFieldSelect) {
+        renderPTabDynamicValueInput(pTabBatchFieldSelect.value);
+        pTabBatchFieldSelect.addEventListener('change', (e) => {
+            e.stopPropagation();
+            renderPTabDynamicValueInput(pTabBatchFieldSelect.value);
+        });
+    }
+
+    if (btnPTabExecuteBatchUpdate) {
+        btnPTabExecuteBatchUpdate.onclick = async () => {
+            if (pTabSelectedTaskIds.size === 0) {
+                alert('请先在下方表格中勾选需要修改的项目任务！');
+                return;
+            }
+
+            const field = pTabBatchFieldSelect ? pTabBatchFieldSelect.value : 'project';
+            const valElem = document.getElementById('pTabFieldValueInput');
+            const nameModeElem = document.getElementById('pTabNameModeSelect');
+            const replaceFromElem = document.getElementById('pTabReplaceFromInput');
+
+            let targetValue = valElem ? valElem.value : '';
+            let targetRealname = '';
+            if ((field === 'assignedTo' || field === 'finishedBy') && targetValue === '__custom__') {
+                const customUserHidden = document.getElementById('pTabCustomUserHidden');
+                const customUserInput = document.getElementById('pTabCustomUserInput');
+                targetValue = customUserHidden ? customUserHidden.value.trim() : '';
+                if (!targetValue && customUserInput) {
+                    targetValue = customUserInput.value.trim();
+                }
+                if (!targetValue) {
+                    alert('请在下拉列表中搜索并选择目标用户，或输入账号！');
+                    return;
+                }
+                let foundUser = cachedUsers.find(u => u.account && u.account.toLowerCase() === targetValue.toLowerCase());
+                if (!foundUser) {
+                    foundUser = cachedUsers.find(u => u.realname === targetValue);
+                    if (foundUser) {
+                        targetValue = foundUser.account;
+                        targetRealname = foundUser.realname;
+                    }
+                } else {
+                    targetRealname = foundUser.realname;
+                }
+            }
+
+            const nameMode = nameModeElem ? nameModeElem.value : 'direct';
+            const replaceFrom = replaceFromElem ? replaceFromElem.value.trim() : '';
+
+            if (field === 'name') {
+                if (nameMode === 'replace') {
+                    if (!replaceFrom) {
+                        alert('请输入要查找并替换的原词！');
+                        return;
+                    }
+                } else if (!targetValue) {
+                    alert('请输入新的任务名称或前后缀！');
+                    return;
+                }
+            }
+
+            const syncDescCheckbox = document.getElementById('pTabSyncDescCheckbox');
+            const syncDesc = (field === 'name' && syncDescCheckbox) ? syncDescCheckbox.checked : false;
+
+            const batchUpdateComment = document.getElementById('pTabBatchUpdateComment');
+            const updateCommentText = batchUpdateComment ? batchUpdateComment.value.trim() : '';
+
+            const fieldText = pTabBatchFieldSelect.options[pTabBatchFieldSelect.selectedIndex].text;
+            let displayTarget = targetValue;
+            if ((field === 'assignedTo' || field === 'finishedBy') && targetRealname) {
+                displayTarget = `${targetRealname} (${targetValue})`;
+            } else if ((field === 'assignedTo' || field === 'finishedBy') && !targetValue) {
+                displayTarget = '置空 (无)';
+            } else if (field === 'finishedBy' && targetValue === currentAccount) {
+                displayTarget = `${currentUserRealname || currentAccount} (${currentAccount})`;
+            }
+            let confirmMsg = `确定将已勾选的 ${pTabSelectedTaskIds.size} 个项目任务的「${fieldText}」统一批量修改为「${displayTarget}」吗？\n` +
+                `• 修改备注：${updateCommentText ? updateCommentText : '无备注 (留空未填)'}`;
+            if (field === 'name') {
+                if (nameMode === 'prefix') confirmMsg = `确定为已勾选的 ${pTabSelectedTaskIds.size} 个项目任务名称统一添加前缀「${targetValue}」吗？\n• 修改备注：${updateCommentText ? updateCommentText : '无备注 (留空未填)'}`;
+                else if (nameMode === 'suffix') confirmMsg = `确定为已勾选的 ${pTabSelectedTaskIds.size} 个项目任务名称统一添加后缀「${targetValue}」吗？\n• 修改备注：${updateCommentText ? updateCommentText : '无备注 (留空未填)'}`;
+                else if (nameMode === 'replace') {
+                    const replaceTargetStr = targetValue ? `「${targetValue}」` : '「空 (删除该词)」';
+                    confirmMsg = `确定将已勾选的 ${pTabSelectedTaskIds.size} 个项目任务名称中的「${replaceFrom}」批量替换为 ${replaceTargetStr} 吗？\n• 修改备注：${updateCommentText ? updateCommentText : '无备注 (留空未填)'}`;
+                }
+                if (syncDesc) {
+                    confirmMsg += `\n（已勾选：同步将任务描述修改为与新名称一致）`;
+                }
+            }
+
+            if (!confirm(confirmMsg)) return;
+
+            showProgressLoading('🛠️ 批量修改项目任务字段', 0, pTabSelectedTaskIds.size, `准备批量更新 ${pTabSelectedTaskIds.size} 个任务...`);
+
+            try {
+                const res = await fetch(apiUrl('/api/tasks/batch-update'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        task_ids: Array.from(pTabSelectedTaskIds),
+                        field: field,
+                        value: targetValue,
+                        name_mode: nameMode,
+                        replace_from: replaceFrom,
+                        sync_desc: syncDesc,
+                        comment: updateCommentText,
+                        stream: true
+                    })
+                });
+
+                let finalDone = null;
+                const contentType = res.headers.get('content-type') || '';
+                if (contentType.includes('ndjson')) {
+                    finalDone = await readNdJsonStream(res, (evt) => {
+                        if (evt.type === 'start') {
+                            updateProgress(0, evt.total, `准备修改 ${evt.total} 条任务...`);
+                        } else if (evt.type === 'progress') {
+                            const taskDesc = evt.task ? `#${evt.task.id} ${evt.task.name}` : '';
+                            updateProgress(evt.current, evt.total, evt.message || `正在修改任务...`, taskDesc);
+                        }
+                    });
+                } else {
+                    finalDone = await res.json();
+                }
+                hideLoading();
+                const resJson = finalDone || {};
+
+                if (resJson.success) {
+                    const data = resJson.data;
+                    let desc = `<b>${fieldText}</b> 更新为 <b>${escapeHtml(displayTarget)}</b>`;
+                    if (field === 'name' && nameMode === 'replace') {
+                        const toText = targetValue ? `「${escapeHtml(targetValue)}」` : '「空 (删除该词)」';
+                        desc = `任务名称中的「${escapeHtml(replaceFrom)}」批量替换为 ${toText}`;
+                    }
+                    showBatchResultModal('批量修改执行结果', data, desc);
+
+                    // 重新检索以刷新视图
+                    if (btnSearchProjectTasks) btnSearchProjectTasks.click();
+                } else {
+                    alert('批量修改失败: ' + resJson.message);
+                }
+            } catch (e) {
+                hideLoading();
+                alert('网络请求异常: ' + e);
+            }
+        };
+    }
+
+    function renderProjectTasksTable(tasks) {
+        if (!projectTasksTableBody) return;
+        if (!tasks || tasks.length === 0) {
+            projectTasksTableBody.innerHTML = `<tr><td colspan="11" class="empty-cell">未找到该项目下符合条件的任务</td></tr>`;
+            if (pTabSummaryBar) pTabSummaryBar.style.display = 'none';
+            const pTabBatchCard = document.getElementById('pTabBatchEditCard');
+            if (pTabBatchCard) pTabBatchCard.style.display = 'none';
+            if (projectTasksTotalBadge) projectTasksTotalBadge.innerHTML = `共 <strong>0</strong> 条任务`;
+            if (projectTasksBadge) projectTasksBadge.style.display = 'none';
+            return;
+        }
+
+        // 统计状态分布与工时
+        let waitCount = 0;
+        let doingCount = 0;
+        let doneCount = 0;
+        let closedCount = 0;
+        let totalConsumed = 0;
+
+        tasks.forEach(t => {
+            const st = String(t.status || '').toLowerCase();
+            if (st === 'wait') waitCount++;
+            else if (st === 'doing') doingCount++;
+            else if (st === 'done') doneCount++;
+            else if (st === 'closed') closedCount++;
+
+            const consumed = parseFloat(t.consumed) || 0;
+            totalConsumed += consumed;
+        });
+
+        if (pTabSummaryBar) {
+            pTabSummaryBar.style.display = 'flex';
+            const statTotal = document.getElementById('pTabStatTotal');
+            const statWait = document.getElementById('pTabStatWait');
+            const statDoing = document.getElementById('pTabStatDoing');
+            const statDone = document.getElementById('pTabStatDone');
+            const statClosed = document.getElementById('pTabStatClosed');
+            const statConsumed = document.getElementById('pTabStatConsumed');
+
+            if (statTotal) statTotal.textContent = tasks.length;
+            if (statWait) statWait.textContent = waitCount;
+            if (statDoing) statDoing.textContent = doingCount;
+            if (statDone) statDone.textContent = doneCount;
+            if (statClosed) statClosed.textContent = closedCount;
+            if (statConsumed) statConsumed.textContent = totalConsumed.toFixed(1);
+        }
+
+        const pTabBatchCard = document.getElementById('pTabBatchEditCard');
+        if (pTabBatchCard) pTabBatchCard.style.display = 'block';
+
+        if (projectTasksTotalBadge) {
+            projectTasksTotalBadge.innerHTML = `共 <strong>${tasks.length}</strong> 条任务`;
+        }
+        if (projectTasksBadge) {
+            projectTasksBadge.textContent = tasks.length;
+            projectTasksBadge.style.display = 'inline-block';
+        }
+
+        let html = '';
+        tasks.forEach(t => {
+            const st = statusMap[t.status] || { label: t.status, class: 'status-wait' };
+            const isAssignedEmpty = (t.assignedTo === '' || t.assignedTo === null);
+            const assignedDisplay = isAssignedEmpty
+                ? `<span style="color:#2563eb; font-weight:600;">未指派</span>`
+                : (t.assignedTo === 'closed' ? `<span style="color:#64748b;">Closed</span>` : escapeHtml(t.assignedToRealname || t.assignedTo));
+
+            const finishedByDisplay = escapeHtml(t.finishedByRealname || t.finishedBy || '-');
+            const openedByDisplay = escapeHtml(t.openedByRealname || t.openedBy || '-');
+            const projNameDisplay = escapeHtml(t.projectName || `[${t.project}]` || '-');
+            const estStarted = escapeHtml(t.estStarted || '-');
+            const deadlineOrFinish = escapeHtml(t.finishedDate || t.deadline || '-');
+            const taskIdStr = String(t.id);
+
+            html += `
+                <tr data-row-id="${t.id}">
+                    <td style="text-align:center;">
+                        <input type="checkbox" class="ptab-task-checkbox" data-id="${t.id}" ${pTabSelectedTaskIds.has(taskIdStr) ? 'checked' : ''}>
+                    </td>
+                    <td><strong>#${t.id}</strong></td>
+                    <td title="项目ID: ${t.project}"><small class="proj-badge">${projNameDisplay}</small></td>
+                    <td>
+                        <span class="task-name-text" style="font-weight:500; color:#1e293b;" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</span>
+                    </td>
+                    <td><span class="status-tag ${st.class}">${st.label}</span></td>
+                    <td>${assignedDisplay}</td>
+                    <td><span style="color:#0f172a; font-weight:500;">${finishedByDisplay}</span></td>
+                    <td><small style="color:#64748b;">${openedByDisplay}</small></td>
+                    <td><small>${t.consumed || 0}/${t.estimate || 0}h</small></td>
+                    <td><small>${estStarted}</small></td>
+                    <td><small>${deadlineOrFinish}</small></td>
+                </tr>
+            `;
+        });
+
+        projectTasksTableBody.innerHTML = html;
+        updatePTabSelectedCount();
+    }
+
+    if (projectTasksTableBody) {
+        projectTasksTableBody.addEventListener('change', (e) => {
+            if (e.target && e.target.classList.contains('ptab-task-checkbox')) {
+                const id = e.target.getAttribute('data-id');
+                if (e.target.checked) {
+                    pTabSelectedTaskIds.add(id);
+                } else {
+                    pTabSelectedTaskIds.delete(id);
+                }
+                updatePTabSelectedCount();
+            }
+        });
+    }
+
+    initPTabFinishedBySelect();
+
+    if (btnSearchProjectTasks) {
+        btnSearchProjectTasks.onclick = async () => {
+            const selectedProjectIds = pTabProjectSelectInstance
+                ? pTabProjectSelectInstance.getSelectedIds()
+                : (document.getElementById('pTabProjectId')?.value || '').split(',').filter(Boolean);
+
+            if (!selectedProjectIds || selectedProjectIds.length === 0) {
+                alert('请在【所属项目】下拉框中至少选择一个项目！');
+                return;
+            }
+
+            const finishedByAccounts = pTabFinishedBySelectInstance
+                ? pTabFinishedBySelectInstance.getSelectedAccounts()
+                : (document.getElementById('pTabFinishedByAccount')?.value || '').split(',').filter(Boolean);
+
+            const status = document.getElementById('pTabStatus')?.value || 'all';
+            const year = (document.getElementById('pTabYear')?.value || '').trim();
+            const keyword = (document.getElementById('pTabKeyword')?.value || '').trim();
+
+            showLoading(`正在检索所选项目的全量任务，请稍候...`);
+            if (projectTasksTableBody) {
+                projectTasksTableBody.innerHTML = `<tr><td colspan="11" class="empty-cell">正在穿透加载项目全量任务...</td></tr>`;
+            }
+
+            try {
+                const res = await fetch(apiUrl('/api/project-tasks/query'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        project_ids: selectedProjectIds,
+                        finished_by: finishedByAccounts,
+                        status,
+                        year,
+                        keyword
+                    })
+                });
+                const data = await res.json();
+                hideLoading();
+
+                if (data.success) {
+                    currentProjectTasks = data.tasks || [];
+                    pTabSelectedTaskIds.clear();
+                    renderProjectTasksTable(currentProjectTasks);
+                } else {
+                    if (projectTasksTableBody) {
+                        projectTasksTableBody.innerHTML = `<tr><td colspan="11" class="empty-cell" style="color:red;">查询失败: ${data.message}</td></tr>`;
+                    }
+                }
+            } catch (e) {
+                hideLoading();
+                if (projectTasksTableBody) {
+                    projectTasksTableBody.innerHTML = `<tr><td colspan="11" class="empty-cell" style="color:red;">请求出错: ${e}</td></tr>`;
+                }
+            }
+        };
+    }
 
     function renderQueryTable(tasks) {
         if (!tasks || tasks.length === 0) {
@@ -1612,9 +3828,79 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         queryTableBody.innerHTML = html;
 
-        // 绑定每行勾选事件
-        document.querySelectorAll('.task-checkbox').forEach(cb => {
-            cb.addEventListener('change', (e) => {
+        // 绑定任务名称单元格点击编辑事件
+        bindInlineNameEditEvents();
+    }
+
+    function handleInlineNameEdit(cell) {
+        if (!cell || cell.querySelector('.inline-name-input')) return;
+
+        const taskId = cell.getAttribute('data-id');
+        const originalName = cell.getAttribute('data-original');
+        const textSpan = cell.querySelector('.task-name-text');
+        const currentVal = textSpan ? textSpan.textContent : originalName;
+
+        // 替换为输入框
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'inline-name-input';
+        input.value = currentVal;
+        input.title = '按回车或点击空白处保存，Esc 键取消修改';
+
+        cell.innerHTML = '';
+        cell.appendChild(input);
+        input.focus();
+        input.select();
+
+        let isCanceled = false;
+
+        // 键盘快捷处理
+        input.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter') {
+                ev.preventDefault();
+                input.blur(); // 触发失焦统一保存
+            } else if (ev.key === 'Escape') {
+                ev.preventDefault();
+                isCanceled = true;
+                renderCellDisplay(cell, taskId, originalName, currentVal);
+            }
+        });
+
+        // 失焦暂存
+        input.addEventListener('blur', () => {
+            if (isCanceled) return;
+
+            const newVal = input.value.trim();
+            if (!newVal) {
+                alert('任务名称不能为空！');
+                renderCellDisplay(cell, taskId, originalName, currentVal);
+                return;
+            }
+
+            if (newVal !== originalName) {
+                // 存入暂存池
+                pendingNameChanges.set(String(taskId), {
+                    id: taskId,
+                    originalName: originalName,
+                    newName: newVal
+                });
+            } else {
+                // 改回原名，移除暂存
+                pendingNameChanges.delete(String(taskId));
+            }
+
+            renderCellDisplay(cell, taskId, originalName, newVal);
+            updateInlineEditBar();
+        });
+    }
+
+    function bindInlineNameEditEvents() {
+        // 已通过 queryTableBody 事件委托统一代理，无需遍历全量 DOM 绑定
+    }
+
+    if (queryTableBody) {
+        queryTableBody.addEventListener('change', (e) => {
+            if (e.target && e.target.classList.contains('task-checkbox')) {
                 const id = e.target.getAttribute('data-id');
                 if (e.target.checked) {
                     selectedTaskIds.add(id);
@@ -1622,77 +3908,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     selectedTaskIds.delete(id);
                 }
                 updateSelectedCount();
-            });
+            }
         });
 
-        // 绑定任务名称单元格点击编辑事件
-        bindInlineNameEditEvents();
-    }
-
-    function bindInlineNameEditEvents() {
-        document.querySelectorAll('.editable-name-cell').forEach(cell => {
-            cell.addEventListener('click', function(e) {
-                // 如果正在输入中，避免重复触发
-                if (this.querySelector('.inline-name-input')) return;
-
-                const taskId = this.getAttribute('data-id');
-                const originalName = this.getAttribute('data-original');
-                const textSpan = this.querySelector('.task-name-text');
-                const currentVal = textSpan ? textSpan.textContent : originalName;
-
-                // 替换为输入框
-                const input = document.createElement('input');
-                input.type = 'text';
-                input.className = 'inline-name-input';
-                input.value = currentVal;
-                input.title = '按回车或点击空白处保存，Esc 键取消修改';
-
-                this.innerHTML = '';
-                this.appendChild(input);
-                input.focus();
-                input.select();
-
-                let isCanceled = false;
-
-                // 键盘快捷处理
-                input.addEventListener('keydown', (ev) => {
-                    if (ev.key === 'Enter') {
-                        ev.preventDefault();
-                        input.blur(); // 触发失焦统一保存
-                    } else if (ev.key === 'Escape') {
-                        ev.preventDefault();
-                        isCanceled = true;
-                        renderCellDisplay(this, taskId, originalName, currentVal);
-                    }
-                });
-
-                // 失焦暂存
-                input.addEventListener('blur', () => {
-                    if (isCanceled) return;
-
-                    const newVal = input.value.trim();
-                    if (!newVal) {
-                        alert('任务名称不能为空！');
-                        renderCellDisplay(this, taskId, originalName, currentVal);
-                        return;
-                    }
-
-                    if (newVal !== originalName) {
-                        // 存入暂存池
-                        pendingNameChanges.set(String(taskId), {
-                            id: taskId,
-                            originalName: originalName,
-                            newName: newVal
-                        });
-                    } else {
-                        // 改回原名，移除暂存
-                        pendingNameChanges.delete(String(taskId));
-                    }
-
-                    renderCellDisplay(this, taskId, originalName, newVal);
-                    updateInlineEditBar();
-                });
-            });
+        queryTableBody.addEventListener('click', (e) => {
+            const cell = e.target.closest('.editable-name-cell');
+            if (cell) {
+                handleInlineNameEdit(cell);
+            }
         });
     }
 
@@ -1928,7 +4151,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         let targetValue = valElem ? valElem.value : '';
         let targetRealname = '';
-        if (field === 'assignedTo' && targetValue === '__custom__') {
+        if ((field === 'assignedTo' || field === 'finishedBy') && targetValue === '__custom__') {
             const customUserHidden = document.getElementById('customUserHidden');
             const customUserInput = document.getElementById('customUserInput');
             targetValue = customUserHidden ? customUserHidden.value.trim() : '';
@@ -1936,11 +4159,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 targetValue = customUserInput.value.trim();
             }
             if (!targetValue) {
-                alert('请在下拉列表中搜索并选择要指派的目标用户，或输入账号！');
+                alert('请在下拉列表中搜索并选择目标用户，或输入账号！');
                 return;
             }
-            const foundUser = cachedUsers.find(u => u.account.toLowerCase() === targetValue.toLowerCase());
-            if (foundUser) {
+            let foundUser = cachedUsers.find(u => u.account && u.account.toLowerCase() === targetValue.toLowerCase());
+            if (!foundUser) {
+                foundUser = cachedUsers.find(u => u.realname === targetValue);
+                if (foundUser) {
+                    targetValue = foundUser.account;
+                    targetRealname = foundUser.realname;
+                }
+            } else {
                 targetRealname = foundUser.realname;
             }
         }
@@ -1948,9 +4177,16 @@ document.addEventListener('DOMContentLoaded', () => {
         const nameMode = nameModeElem ? nameModeElem.value : 'direct';
         const replaceFrom = replaceFromElem ? replaceFromElem.value.trim() : '';
 
-        if (field === 'name' && !targetValue && nameMode !== 'replace') {
-            alert('请输入新的任务名称或前后缀！');
-            return;
+        if (field === 'name') {
+            if (nameMode === 'replace') {
+                if (!replaceFrom) {
+                    alert('请输入要查找并替换的原词！');
+                    return;
+                }
+            } else if (!targetValue) {
+                alert('请输入新的任务名称或前后缀！');
+                return;
+            }
         }
 
         const syncDescCheckbox = document.getElementById('syncDescCheckbox');
@@ -1961,15 +4197,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const fieldText = batchFieldSelect.options[batchFieldSelect.selectedIndex].text;
         let displayTarget = targetValue;
-        if (field === 'assignedTo' && targetRealname) {
+        if ((field === 'assignedTo' || field === 'finishedBy') && targetRealname) {
             displayTarget = `${targetRealname} (${targetValue})`;
+        } else if ((field === 'assignedTo' || field === 'finishedBy') && !targetValue) {
+            displayTarget = '置空 (无)';
+        } else if (field === 'finishedBy' && targetValue === currentAccount) {
+            displayTarget = `${userRealname.textContent || currentAccount} (${currentAccount})`;
         }
         let confirmMsg = `确定将已勾选的 ${selectedTaskIds.size} 个任务的「${fieldText}」统一批量修改为「${displayTarget}」吗？\n` +
             `• 修改备注：${updateCommentText ? updateCommentText : '无备注 (留空未填)'}`;
         if (field === 'name') {
             if (nameMode === 'prefix') confirmMsg = `确定为已勾选的 ${selectedTaskIds.size} 个任务名称统一添加前缀「${targetValue}」吗？\n• 修改备注：${updateCommentText ? updateCommentText : '无备注 (留空未填)'}`;
             else if (nameMode === 'suffix') confirmMsg = `确定为已勾选的 ${selectedTaskIds.size} 个任务名称统一添加后缀「${targetValue}」吗？\n• 修改备注：${updateCommentText ? updateCommentText : '无备注 (留空未填)'}`;
-            else if (nameMode === 'replace') confirmMsg = `确定将已勾选的 ${selectedTaskIds.size} 个任务名称中的「${replaceFrom}」批量替换为「${targetValue}」吗？\n• 修改备注：${updateCommentText ? updateCommentText : '无备注 (留空未填)'}`;
+            else if (nameMode === 'replace') {
+                const replaceTargetStr = targetValue ? `「${targetValue}」` : '「空 (删除该词)」';
+                confirmMsg = `确定将已勾选的 ${selectedTaskIds.size} 个任务名称中的「${replaceFrom}」批量替换为 ${replaceTargetStr} 吗？\n• 修改备注：${updateCommentText ? updateCommentText : '无备注 (留空未填)'}`;
+            }
             if (syncDesc) {
                 confirmMsg += `\n（已勾选：同步将任务描述修改为与新名称一致）`;
             }
@@ -2014,7 +4257,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (resJson.success) {
                 const data = resJson.data;
-                const desc = `<b>${fieldText}</b> 更新为 <b>${escapeHtml(displayTarget)}</b>`;
+                let desc = `<b>${fieldText}</b> 更新为 <b>${escapeHtml(displayTarget)}</b>`;
+                if (field === 'name' && nameMode === 'replace') {
+                    const toText = targetValue ? `「${escapeHtml(targetValue)}」` : '「空 (删除该词)」';
+                    desc = `任务名称中的「${escapeHtml(replaceFrom)}」批量替换为 ${toText}`;
+                }
                 showBatchResultModal('批量修改执行结果', data, desc);
 
                 // 重新检索以刷新视图
@@ -3635,7 +5882,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 首次进入自动加载
     initFilterUserSelect();
+    initPTabFinishedBySelect();
     checkStatus();
+    loadGroups();
     loadMyActiveTasks();
 });
 
