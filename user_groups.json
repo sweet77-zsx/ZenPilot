@@ -1,35 +1,31 @@
 [
   {
     "id": "grp_default_app",
-    "name": "应用组",
+    "name": "应用研发组",
     "members": [
       {
-        "account": "wanglinmiao",
-        "realname": "王淋淼"
+        "account": "dev_user",
+        "realname": "张开发"
       },
       {
-        "account": "LvZizheng",
-        "realname": "吕自政"
+        "account": "fe_user",
+        "realname": "李前端"
       },
       {
-        "account": "ZengZiqiang",
-        "realname": "曾自强"
+        "account": "be_user",
+        "realname": "王后端"
       },
       {
-        "account": "Luoxin",
-        "realname": "罗鑫"
+        "account": "qa_user",
+        "realname": "赵测试"
       },
       {
-        "account": "Dujiantao",
-        "realname": "杜健涛"
+        "account": "ops_user",
+        "realname": "钱运维"
       },
       {
-        "account": "huangweiwei",
-        "realname": "黄威威"
-      },
-      {
-        "account": "HaoYinhang",
-        "realname": "郝银行"
+        "account": "pm_user",
+        "realname": "孙产品"
       }
     ]
   }

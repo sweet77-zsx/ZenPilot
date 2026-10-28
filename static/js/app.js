@@ -2689,6 +2689,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (targetId === 'tab-finish') {
                 loadMyActiveTasks();
+            } else if (targetId === 'tab-gitee-commits') {
+                initGiteeModule();
             }
         });
     });
@@ -5877,6 +5879,1441 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // =========================================================================
+    // 模块：Gitee 开放 API 代码提交看板
+    // =========================================================================
+    const giteeState = {
+        authenticated: false,
+        user: null,
+        enterprise: null,
+        enterpriseMemberId: null,
+        stats: null,
+        repos: [],
+        branches: [],
+        commits: [],
+        filteredCommits: [],
+        isDemo: false,
+        hasLoaded: false,
+        isLoading: false,
+        selectedRepo: 'all',
+        searchKeyword: '',
+        selectedType: 'all',
+        selectedBranch: 'all',
+        currentPage: 1,
+        pageSize: 20,
+        expandedCommitIds: new Set(),
+        rawPayloads: null,
+        currentPayloadTab: 'all'
+    };
+
+    // DOM 元素引用
+    const giteeCommitBadge = document.getElementById('giteeCommitBadge');
+    const giteeModeBadge = document.getElementById('giteeModeBadge');
+    const giteeModeText = document.getElementById('giteeModeText');
+    const btnGiteeRefreshCommits = document.getElementById('btnGiteeRefreshCommits');
+    const btnGiteeOpenAuthModal = document.getElementById('btnGiteeOpenAuthModal');
+
+    // 用户与企业画像
+    const giteeUserAvatarImg = document.getElementById('giteeUserAvatarImg');
+    const giteeUserAvatarFallback = document.getElementById('giteeUserAvatarFallback');
+    const giteeUserRealname = document.getElementById('giteeUserRealname');
+    const giteeUserLogin = document.getElementById('giteeUserLogin');
+    const giteeEnterpriseName = document.getElementById('giteeEnterpriseName');
+    const giteeMetaDateRange = document.getElementById('giteeMetaDateRange');
+    const giteeMetaEnterpriseId = document.getElementById('giteeMetaEnterpriseId');
+    const giteeMetaMemberId = document.getElementById('giteeMetaMemberId');
+
+    // 统计指标
+    const giteeStatActiveRepos = document.getElementById('giteeStatActiveRepos');
+    const giteeStatThisWeekCommits = document.getElementById('giteeStatThisWeekCommits');
+    const giteeStatPushEvents = document.getElementById('giteeStatPushEvents');
+    const giteeStatActiveBranches = document.getElementById('giteeStatActiveBranches');
+
+    // 过滤与检索
+    const giteeRepoTagsList = document.getElementById('giteeRepoTagsList');
+    const giteeTagAllRepos = document.getElementById('giteeTagAllRepos');
+    const giteeTagAllCount = document.getElementById('giteeTagAllCount');
+    const giteeSearchInput = document.getElementById('giteeSearchInput');
+    const giteeSearchClear = document.getElementById('giteeSearchClear');
+    const giteeCommitTypeFilter = document.getElementById('giteeCommitTypeFilter');
+    const giteeBranchFilter = document.getElementById('giteeBranchFilter');
+    const giteeFilteredCount = document.getElementById('giteeFilteredCount');
+
+    // 流水列表与分页
+    const giteeLoadingNotice = document.getElementById('giteeLoadingNotice');
+    const giteeEmptyNotice = document.getElementById('giteeEmptyNotice');
+    const giteeEmptySubtext = document.getElementById('giteeEmptySubtext');
+    const giteeCommitStreamList = document.getElementById('giteeCommitStreamList');
+    const giteePaginationBar = document.getElementById('giteePaginationBar');
+    const giteePageStartIdx = document.getElementById('giteePageStartIdx');
+    const giteePageEndIdx = document.getElementById('giteePageEndIdx');
+    const giteePageTotalCount = document.getElementById('giteePageTotalCount');
+    const giteePageSizeSelect = document.getElementById('giteePageSizeSelect');
+    const giteePageButtons = document.getElementById('giteePageButtons');
+
+    // 授权弹窗
+    const giteeAuthModal = document.getElementById('giteeAuthModal');
+    const giteeAuthModalCloseBtn = document.getElementById('giteeAuthModalCloseBtn');
+    const giteeAuthCancelBtn = document.getElementById('giteeAuthCancelBtn');
+    const giteeAuthSubmitBtn = document.getElementById('giteeAuthSubmitBtn');
+    const btnGiteeDemoLogin = document.getElementById('btnGiteeDemoLogin');
+    const btnGiteeDisconnect = document.getElementById('btnGiteeDisconnect');
+    const giteeTokenInput = document.getElementById('giteeTokenInput');
+    const btnToggleGiteeToken = document.getElementById('btnToggleGiteeToken');
+    const giteeEnterpriseInput = document.getElementById('giteeEnterpriseInput');
+    const giteeDetectedEnterprises = document.getElementById('giteeDetectedEnterprises');
+    const giteeEnterpriseChips = document.getElementById('giteeEnterpriseChips');
+
+
+    function escapeGiteeHtml(str) {
+        if (!str && str !== 0) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    function copyGiteeTextToClipboard(text, onSuccess) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(() => {
+                if (onSuccess) onSuccess();
+            }).catch(() => {
+                fallbackGiteeCopy(text, onSuccess);
+            });
+        } else {
+            fallbackGiteeCopy(text, onSuccess);
+        }
+    }
+
+    function fallbackGiteeCopy(text, onSuccess) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        try {
+            document.execCommand('copy');
+            if (onSuccess) onSuccess();
+        } catch (e) {}
+        document.body.removeChild(ta);
+    }
+
+    // 初始化 Gitee 模块主入口 (切换到 Tab 时触发)
+    async function initGiteeModule() {
+        updateGiteeAuthButtonState();
+        if (!giteeState.hasLoaded) {
+            await loadGiteeData(false);
+        }
+    }
+
+    // 静默检测 Gitee 登录状态 (首次页面加载)
+    async function checkGiteeStatusQuietly() {
+        try {
+            const res = await fetch(apiUrl('/api/gitee/status'));
+            if (!res.ok) return;
+            const data = await res.json();
+            if (data.authenticated) {
+                giteeState.authenticated = true;
+                giteeState.user = data.user;
+                giteeState.isDemo = !!data.is_demo;
+                if (giteeCommitBadge) {
+                    giteeCommitBadge.style.display = 'inline-block';
+                    giteeCommitBadge.textContent = data.is_demo ? '演示' : '在线';
+                }
+            } else {
+                giteeState.authenticated = false;
+            }
+            updateGiteeAuthButtonState();
+        } catch (e) {
+            // 静默失败，不打扰核心禅道流程
+        }
+    }
+
+    // 加载 Gitee 提交数据
+    async function loadGiteeData(forceRefresh = false, useDemo = false) {
+        if (giteeState.isLoading) return;
+        giteeState.isLoading = true;
+
+        if (giteeLoadingNotice) giteeLoadingNotice.style.display = 'block';
+        if (giteeEmptyNotice) giteeEmptyNotice.style.display = 'none';
+        if (giteeCommitStreamList) giteeCommitStreamList.style.display = 'none';
+        if (btnGiteeRefreshCommits) {
+            btnGiteeRefreshCommits.disabled = true;
+            btnGiteeRefreshCommits.textContent = '🔄 正在获取提交...';
+        }
+
+        try {
+            const url = apiUrl(`/api/gitee/commits?refresh=${forceRefresh ? 1 : 0}&use_demo=${useDemo ? 1 : 0}`);
+            const res = await fetch(url);
+            const data = await res.json();
+
+            if (res.status === 401 || !data.authenticated) {
+                giteeState.authenticated = false;
+                giteeState.hasLoaded = true;
+                if (giteeLoadingNotice) giteeLoadingNotice.style.display = 'none';
+                if (giteeCommitBadge) giteeCommitBadge.style.display = 'none';
+                updateGiteeAuthButtonState();
+                // 打开配置弹窗引导授权
+                openGiteeAuthModal();
+                return;
+            }
+
+            if (data.code !== 200) {
+                throw new Error(data.message || '获取 Gitee 提交记录失败');
+            }
+
+            // 更新状态
+            giteeState.authenticated = true;
+            giteeState.hasLoaded = true;
+            updateGiteeAuthButtonState();
+            giteeState.user = data.user || {};
+            giteeState.enterprise = data.enterprise || {};
+            giteeState.enterpriseMemberId = data.enterprise_member_id || (data.stats && data.stats.member_id) || (data.user && data.user.id);
+            giteeState.stats = data.stats || {};
+            if (!giteeState.stats.push_events_count && giteeState.stats.total_push_events) {
+                giteeState.stats.push_events_count = giteeState.stats.total_push_events;
+            }
+            giteeState.repos = (data.repos || []).map(r => ({
+                path: r.path || r.name || r.full_name || '',
+                name: r.name || r.path || '',
+                count: r.count || 0
+            }));
+            giteeState.commits = (data.commits || []).map(c => {
+                const fullSha = c.full_sha || c.commit_id || c.sha || '';
+                const shortSha = c.short_sha || (fullSha ? fullSha.slice(0, 7) : '');
+                return {
+                    id: c.id || c.commit_id || c.sha || shortSha || Math.random().toString(),
+                    full_sha: fullSha,
+                    short_sha: shortSha,
+                    commit_title: c.commit_title || c.title || '代码提交',
+                    commit_desc: c.commit_desc || c.body || '',
+                    commit_type: c.commit_type || c.type || 'OTHER',
+                    repo_name: c.repo_name || c.repo || c.repo_path || '',
+                    repo_path: c.repo_path || c.repo_full_name || c.repo_name || '',
+                    branch: c.branch || 'main',
+                    html_url: c.html_url || c.url || '#',
+                    author_name: c.author_name || (data.user && data.user.name) || '',
+                    author_login: c.author_login || c.author_username || (data.user && data.user.login) || '',
+                    event_id: c.event_id || c.push_event_id || 'N/A',
+                    created_at: c.created_at || c.timestamp || '',
+                    relative_time: c.relative_time || '刚刚'
+                };
+            });
+
+            // 提取所有涉及的分支列表
+            const branchSet = new Set(data.branches || []);
+            giteeState.commits.forEach(c => {
+                if (c.branch) branchSet.add(c.branch);
+            });
+            giteeState.branches = Array.from(branchSet);
+            giteeState.isDemo = !!data.is_demo;
+
+            // 渲染各个看板区块
+            renderGiteeProfile();
+            renderGiteeStats();
+            renderGiteeRepoTags();
+            renderGiteeBranchFilterOptions();
+
+            // 更新选项卡徽章
+            if (giteeCommitBadge) {
+                giteeCommitBadge.style.display = 'inline-block';
+                giteeCommitBadge.textContent = giteeState.isDemo ? '演示' : giteeState.commits.length;
+            }
+
+            // 应用筛选并渲染列表
+            applyGiteeFilters(true);
+
+        } catch (e) {
+            showModal('Gitee 数据拉取提示', `<div style="color: #ef4444; line-height: 1.6;">拉取 Gitee 数据异常: ${escapeGiteeHtml(e.message || e)}<br><br><span style="color:#64748b;">您可以检查网络连通性或点击右上角【授权与企业配置】切换为演示数据体验。</span></div>`);
+            if (giteeEmptyNotice) giteeEmptyNotice.style.display = 'block';
+        } finally {
+            giteeState.isLoading = false;
+            if (giteeLoadingNotice) giteeLoadingNotice.style.display = 'none';
+            if (btnGiteeRefreshCommits) {
+                btnGiteeRefreshCommits.disabled = false;
+                btnGiteeRefreshCommits.textContent = '🔄 刷新最新提交';
+            }
+        }
+    }
+
+    // 渲染用户画像与元数据卡片
+    function renderGiteeProfile() {
+        const user = giteeState.user || {};
+        const ent = giteeState.enterprise || {};
+        const stats = giteeState.stats || {};
+
+        const realname = user.name || user.login || (giteeState.authenticated ? 'Gitee 用户' : '未授权用户');
+        const login = user.login || '';
+
+        if (giteeUserRealname) giteeUserRealname.textContent = realname;
+        if (giteeUserLogin) giteeUserLogin.textContent = login ? `@${login}` : '';
+
+        // 头像处理
+        if (user.avatar_url && giteeUserAvatarImg) {
+            giteeUserAvatarImg.src = user.avatar_url;
+            giteeUserAvatarImg.style.display = 'block';
+            if (giteeUserAvatarFallback) giteeUserAvatarFallback.style.display = 'none';
+        } else if (giteeUserAvatarFallback) {
+            giteeUserAvatarFallback.textContent = (realname || 'G')[0];
+            giteeUserAvatarFallback.style.display = 'flex';
+            if (giteeUserAvatarImg) giteeUserAvatarImg.style.display = 'none';
+        }
+
+        // 所属企业名称
+        if (giteeEnterpriseName) {
+            giteeEnterpriseName.textContent = ent.name || ent.path || (giteeState.authenticated ? '未指定所属企业' : '尚未连接企业');
+        }
+
+        // 元数据三项指标
+        if (giteeMetaDateRange) {
+            giteeMetaDateRange.textContent = stats.date_range || '近 7 天';
+        }
+        if (giteeMetaEnterpriseId) {
+            giteeMetaEnterpriseId.textContent = ent.id || 'N/A';
+        }
+        if (giteeMetaMemberId) {
+            giteeMetaMemberId.textContent = giteeState.enterpriseMemberId || user.id || 'N/A';
+        }
+
+        // 运行模式徽章
+        if (giteeModeText) {
+            giteeModeText.textContent = !giteeState.authenticated
+                ? '未连接'
+                : (giteeState.isDemo ? '演示模式 (Mock)' : '实时在线 (OpenAPI)');
+        }
+        if (giteeModeBadge) {
+            if (!giteeState.authenticated) {
+                giteeModeBadge.style.background = '#f1f5f9';
+                giteeModeBadge.style.color = '#64748b';
+                giteeModeBadge.style.borderColor = '#cbd5e1';
+            } else {
+                giteeModeBadge.style.background = giteeState.isDemo ? '#fef3c7' : '#f0fdf4';
+                giteeModeBadge.style.color = giteeState.isDemo ? '#b45309' : '#15803d';
+                giteeModeBadge.style.borderColor = giteeState.isDemo ? '#fde68a' : '#bbf7d0';
+            }
+        }
+    }
+
+    // 渲染四项核心统计指标卡片
+    function renderGiteeStats() {
+        const stats = giteeState.stats || {};
+        if (giteeStatActiveRepos) {
+            giteeStatActiveRepos.textContent = stats.active_repos_count || 0;
+        }
+        if (giteeStatThisWeekCommits) {
+            giteeStatThisWeekCommits.textContent = stats.this_week_commits_count || 0;
+        }
+        if (giteeStatPushEvents) {
+            giteeStatPushEvents.textContent = stats.push_events_count || 0;
+        }
+        if (giteeStatActiveBranches) {
+            giteeStatActiveBranches.textContent = stats.active_branches_count || 0;
+        }
+    }
+
+    // 渲染仓库标签筛选胶囊
+    function renderGiteeRepoTags() {
+        if (!giteeRepoTagsList) return;
+        const totalCount = (giteeState.commits || []).length;
+        if (giteeTagAllCount) giteeTagAllCount.textContent = totalCount;
+
+        // 高亮“全部仓库”胶囊
+        if (giteeTagAllRepos) {
+            if (giteeState.selectedRepo === 'all') {
+                giteeTagAllRepos.classList.add('active');
+            } else {
+                giteeTagAllRepos.classList.remove('active');
+            }
+        }
+
+        const repos = giteeState.repos || [];
+        giteeRepoTagsList.innerHTML = repos.map(r => {
+            const isActive = giteeState.selectedRepo === r.path || giteeState.selectedRepo === r.name;
+            const displayName = r.name || r.path;
+            const tagKey = r.path || r.name;
+            return `
+                <button type="button" class="gitee-repo-tag-pill ${isActive ? 'active' : ''}" data-repo="${escapeGiteeHtml(tagKey)}" title="${escapeGiteeHtml(displayName)} (${r.path})">
+                    <span>${escapeGiteeHtml(displayName)}</span>
+                    <span class="tag-count">${r.count}</span>
+                </button>
+            `;
+        }).join('');
+
+        // 绑定每个仓库胶囊点击事件
+        giteeRepoTagsList.querySelectorAll('.gitee-repo-tag-pill').forEach(btn => {
+            btn.onclick = () => {
+                const repoPath = btn.getAttribute('data-repo');
+                giteeState.selectedRepo = repoPath;
+                renderGiteeRepoTags();
+                renderGiteeBranchFilterOptions(); // 联动更新该仓库下的分支选项
+                applyGiteeFilters(true);
+            };
+        });
+    }
+
+    if (giteeTagAllRepos) {
+        giteeTagAllRepos.onclick = () => {
+            giteeState.selectedRepo = 'all';
+            renderGiteeRepoTags();
+            renderGiteeBranchFilterOptions(); // 联动恢复全部分支选项
+            applyGiteeFilters(true);
+        };
+    }
+
+    // 渲染分支下拉选项 (与选中的项目仓库动态联动)
+    function renderGiteeBranchFilterOptions() {
+        if (!giteeBranchFilter) return;
+
+        const selectedRepo = giteeState.selectedRepo;
+        // 筛选出属于当前选定仓库的提交
+        const targetCommits = selectedRepo === 'all'
+            ? (giteeState.commits || [])
+            : (giteeState.commits || []).filter(c => c.repo_path === selectedRepo || c.repo_name === selectedRepo);
+
+        // 提取该仓库下的所有唯一开发分支
+        const branchSet = new Set();
+        targetCommits.forEach(c => {
+            if (c.branch) branchSet.add(c.branch);
+        });
+        const repoBranches = Array.from(branchSet).sort();
+
+        // 若当前选中的分支不在新分支集合中，重置为 'all'
+        if (giteeState.selectedBranch !== 'all' && !branchSet.has(giteeState.selectedBranch)) {
+            giteeState.selectedBranch = 'all';
+        }
+
+        let html = '<option value="all">🌿 全部分支</option>';
+        repoBranches.forEach(b => {
+            const isSelected = b === giteeState.selectedBranch ? 'selected' : '';
+            html += `<option value="${escapeGiteeHtml(b)}" ${isSelected}>🌿 ${escapeGiteeHtml(b)}</option>`;
+        });
+
+        giteeBranchFilter.innerHTML = html;
+        giteeBranchFilter.value = giteeState.selectedBranch;
+    }
+
+    // 执行多维筛选与关键字检索
+    function applyGiteeFilters(resetPage = false) {
+        if (resetPage) {
+            giteeState.currentPage = 1;
+        }
+
+        const kw = (giteeState.searchKeyword || '').trim().toLowerCase();
+        const selectedRepo = giteeState.selectedRepo;
+        const selectedType = giteeState.selectedType;
+        const selectedBranch = giteeState.selectedBranch;
+
+        giteeState.filteredCommits = (giteeState.commits || []).filter(c => {
+            // 仓库过滤 (同时支持匹配完整路径与仓库短名)
+            if (selectedRepo !== 'all' && c.repo_path !== selectedRepo && c.repo_name !== selectedRepo) {
+                return false;
+            }
+            // 提交类型过滤 (FEAT, FIX, STYLE 等)
+            if (selectedType !== 'all' && c.commit_type !== selectedType) {
+                return false;
+            }
+            // 分支过滤
+            if (selectedBranch !== 'all' && c.branch !== selectedBranch) {
+                return false;
+            }
+            // 关键字搜索 (支持提交标题、描述、作者名/登录名、Commit 短哈希/完整哈希)
+            if (kw) {
+                const titleMatch = (c.commit_title || '').toLowerCase().includes(kw);
+                const descMatch = (c.commit_desc || '').toLowerCase().includes(kw);
+                const authorMatch = (c.author_name || '').toLowerCase().includes(kw) ||
+                                    (c.author_login || '').toLowerCase().includes(kw);
+                const shaMatch = (c.short_sha || '').toLowerCase().includes(kw) ||
+                                 (c.full_sha || '').toLowerCase().includes(kw);
+                if (!titleMatch && !descMatch && !authorMatch && !shaMatch) {
+                    return false;
+                }
+            }
+            return true;
+        });
+
+        if (giteeFilteredCount) {
+            giteeFilteredCount.textContent = giteeState.filteredCommits.length;
+        }
+
+        renderGiteeCommitStream();
+    }
+
+    // 渲染 Commit 流水列表与分页条
+    function renderGiteeCommitStream() {
+        if (!giteeCommitStreamList) return;
+
+        const total = giteeState.filteredCommits.length;
+        const pageSize = giteeState.pageSize;
+        const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+        if (giteeState.currentPage > totalPages) {
+            giteeState.currentPage = totalPages;
+        }
+        if (giteeState.currentPage < 1) {
+            giteeState.currentPage = 1;
+        }
+
+        const startIdx = (giteeState.currentPage - 1) * pageSize;
+        const endIdx = Math.min(startIdx + pageSize, total);
+        const currentSlice = giteeState.filteredCommits.slice(startIdx, endIdx);
+
+        if (total === 0) {
+            giteeCommitStreamList.innerHTML = '';
+            giteeCommitStreamList.style.display = 'none';
+            if (giteeEmptyNotice) {
+                giteeEmptyNotice.style.display = 'block';
+                if (giteeEmptySubtext) {
+                    if (giteeState.searchKeyword || giteeState.selectedRepo !== 'all' || giteeState.selectedType !== 'all' || giteeState.selectedBranch !== 'all') {
+                        giteeEmptySubtext.textContent = '当前检索条件暂无结果，请尝试清空关键字或切换全部分支/仓库';
+                    } else {
+                        giteeEmptySubtext.textContent = '暂无已记录的代码提交，可在 Gitee 企业代码库推送后点击【刷新最新提交】';
+                    }
+                }
+            }
+            if (giteePaginationBar) giteePaginationBar.style.display = 'none';
+            return;
+        }
+
+        if (giteeEmptyNotice) giteeEmptyNotice.style.display = 'none';
+        giteeCommitStreamList.style.display = 'flex';
+        if (giteePaginationBar) giteePaginationBar.style.display = 'flex';
+
+        // 更新分页统计文案
+        if (giteePageStartIdx) giteePageStartIdx.textContent = total > 0 ? (startIdx + 1) : 0;
+        if (giteePageEndIdx) giteePageEndIdx.textContent = endIdx;
+        if (giteePageTotalCount) giteePageTotalCount.textContent = total;
+
+        const entName = (giteeState.enterprise && (giteeState.enterprise.name || giteeState.enterprise.path)) || '所属企业';
+
+        // 渲染单条 Commit 条目
+        giteeCommitStreamList.innerHTML = currentSlice.map(commit => {
+            const isExpanded = giteeState.expandedCommitIds.has(commit.id);
+            const typeLower = (commit.commit_type || 'other').toLowerCase();
+            const repoDisplayName = commit.repo_name || commit.repo_path;
+
+            let expandDetailHtml = '';
+            if (isExpanded) {
+                expandDetailHtml = `
+                    <div class="commit-expand-detail">
+                        <div class="detail-row">
+                            <span class="detail-label">项目全称:</span>
+                            <span class="detail-value"><b>${escapeGiteeHtml(entName)}</b> / ${escapeGiteeHtml(repoDisplayName)} <span style="color:#64748b; font-size:11px;">(${escapeGiteeHtml(commit.repo_path)})</span></span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">完整哈希:</span>
+                            <span class="detail-value" style="display: flex; align-items: center; gap: 8px;">
+                                <code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:11px; border:1px solid #e2e8f0;">${escapeGiteeHtml(commit.full_sha)}</code>
+                                <button type="button" class="btn btn-secondary btn-xs btn-copy-full-sha" data-sha="${escapeGiteeHtml(commit.full_sha)}" title="复制完整哈希到剪贴板">📋 复制</button>
+                            </span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">提交作者:</span>
+                            <span class="detail-value">${escapeGiteeHtml(commit.author_name || commit.author_login)} <span style="color:#64748b;">(@${escapeGiteeHtml(commit.author_login || '')})</span></span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Push事件ID:</span>
+                            <span class="detail-value"><code style="color:#0284c7; background:#eff6ff; padding:2px 6px; border-radius:4px;">#${escapeGiteeHtml(commit.event_id || 'N/A')}</code></span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">原始链接:</span>
+                            <span class="detail-value">
+                                <a href="${escapeGiteeHtml(commit.html_url)}" target="_blank" rel="noopener noreferrer" style="color:#2563eb; text-decoration:none; word-break:break-all;">${escapeGiteeHtml(commit.html_url)} ↗</a>
+                            </span>
+                        </div>
+                        <div class="detail-row" style="align-items: flex-start;">
+                            <span class="detail-label" style="margin-top: 4px;">详细描述:</span>
+                            <div class="detail-value" style="flex: 1;">
+                                <pre class="detail-body-pre">${escapeGiteeHtml(commit.commit_desc || commit.commit_title || '无补充提交描述')}</pre>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            return `
+                <div class="gitee-commit-item ${isExpanded ? 'expanded' : ''}" data-commit-id="${escapeGiteeHtml(commit.id)}">
+                    <div class="commit-item-main">
+                        <div class="commit-header-meta">
+                            <span class="commit-repo-badge" title="代码仓库: ${escapeGiteeHtml(commit.repo_path)}">
+                                📁 ${escapeGiteeHtml(repoDisplayName)}
+                            </span>
+                            <span class="commit-branch-pill" title="所在开发分支">
+                                🌿 ${escapeGiteeHtml(commit.branch)}
+                            </span>
+                            <span class="commit-type-tag ${typeLower}" title="提交类型">
+                                ${escapeGiteeHtml(commit.commit_type)}
+                            </span>
+                            <span class="commit-sha-pill" data-sha="${escapeGiteeHtml(commit.full_sha)}" title="点击快捷复制哈希">
+                                #${escapeGiteeHtml(commit.short_sha)}
+                            </span>
+                            <span class="commit-time" title="提交时间: ${escapeGiteeHtml(commit.created_at)}">
+                                🕒 ${escapeGiteeHtml(commit.relative_time)}
+                            </span>
+                            <a href="${escapeGiteeHtml(commit.html_url)}" target="_blank" rel="noopener noreferrer" class="commit-ext-link" title="在 Gitee 网页查看此次提交">
+                                Gitee 查看 ↗
+                            </a>
+                            <button type="button" class="commit-toggle-btn" data-toggle-commit="${escapeGiteeHtml(commit.id)}">
+                                ${isExpanded ? '收起 ▴' : '详情 ▾'}
+                            </button>
+                        </div>
+                        <div class="commit-title-row">
+                            <div class="commit-title" title="${escapeGiteeHtml(commit.commit_title)}">
+                                ${escapeGiteeHtml(commit.commit_title)}
+                            </div>
+                        </div>
+                        ${expandDetailHtml}
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        renderGiteePaginationButtons(totalPages);
+    }
+
+    // 渲染分页按钮
+    function renderGiteePaginationButtons(totalPages) {
+        if (!giteePageButtons) return;
+        const current = giteeState.currentPage;
+        let html = '';
+
+        // 上一页
+        html += `<button type="button" class="page-btn" data-page="${current - 1}" ${current <= 1 ? 'disabled' : ''} title="上一页">&lt;</button>`;
+
+        // 页码序列计算
+        const pages = [];
+        if (totalPages <= 7) {
+            for (let i = 1; i <= totalPages; i++) pages.push(i);
+        } else {
+            pages.push(1);
+            if (current > 3) pages.push('...');
+            const start = Math.max(2, current - 1);
+            const end = Math.min(totalPages - 1, current + 1);
+            for (let i = start; i <= end; i++) pages.push(i);
+            if (current < totalPages - 2) pages.push('...');
+            pages.push(totalPages);
+        }
+
+        pages.forEach(p => {
+            if (p === '...') {
+                html += `<span class="page-btn" style="border:none; cursor:default; background:transparent;">...</span>`;
+            } else {
+                html += `<button type="button" class="page-btn ${p === current ? 'active' : ''}" data-page="${p}">${p}</button>`;
+            }
+        });
+
+        // 下一页
+        html += `<button type="button" class="page-btn" data-page="${current + 1}" ${current >= totalPages ? 'disabled' : ''} title="下一页">&gt;</button>`;
+
+        giteePageButtons.innerHTML = html;
+
+        // 绑定分页按钮事件
+        giteePageButtons.querySelectorAll('.page-btn[data-page]').forEach(btn => {
+            btn.onclick = () => {
+                const targetPage = parseInt(btn.getAttribute('data-page'), 10);
+                if (targetPage && targetPage !== current && targetPage >= 1 && targetPage <= totalPages) {
+                    giteeState.currentPage = targetPage;
+                    renderGiteeCommitStream();
+                }
+            };
+        });
+    }
+
+    // 事件委托：Commit 列表内展开/折叠与哈希一键复制
+    if (giteeCommitStreamList) {
+        giteeCommitStreamList.addEventListener('click', (e) => {
+            // 展开/收起详情
+            const toggleBtn = e.target.closest('[data-toggle-commit]');
+            if (toggleBtn) {
+                const commitId = toggleBtn.getAttribute('data-toggle-commit');
+                if (giteeState.expandedCommitIds.has(commitId)) {
+                    giteeState.expandedCommitIds.delete(commitId);
+                } else {
+                    giteeState.expandedCommitIds.add(commitId);
+                }
+                renderGiteeCommitStream();
+                return;
+            }
+
+            // 复制哈希 (短哈希或复制按钮)
+            const copyShaBtn = e.target.closest('[data-sha]');
+            if (copyShaBtn) {
+                const sha = copyShaBtn.getAttribute('data-sha');
+                if (sha) {
+                    const originalText = copyShaBtn.textContent;
+                    copyGiteeTextToClipboard(sha, () => {
+                        copyShaBtn.textContent = '已复制!';
+                        setTimeout(() => {
+                            copyShaBtn.textContent = originalText;
+                        }, 1200);
+                    });
+                }
+            }
+        });
+    }
+
+    // 搜索框事件与清空
+    if (giteeSearchInput) {
+        giteeSearchInput.addEventListener('input', (e) => {
+            giteeState.searchKeyword = e.target.value;
+            if (giteeSearchClear) {
+                giteeSearchClear.style.display = e.target.value ? 'block' : 'none';
+            }
+            applyGiteeFilters(true);
+        });
+    }
+
+    if (giteeSearchClear) {
+        giteeSearchClear.onclick = () => {
+            if (giteeSearchInput) {
+                giteeSearchInput.value = '';
+                giteeState.searchKeyword = '';
+            }
+            giteeSearchClear.style.display = 'none';
+            applyGiteeFilters(true);
+            if (giteeSearchInput) giteeSearchInput.focus();
+        };
+    }
+
+    // 提交类型与分支下拉筛选
+    if (giteeCommitTypeFilter) {
+        giteeCommitTypeFilter.addEventListener('change', (e) => {
+            giteeState.selectedType = e.target.value;
+            applyGiteeFilters(true);
+        });
+    }
+
+    if (giteeBranchFilter) {
+        giteeBranchFilter.addEventListener('change', (e) => {
+            giteeState.selectedBranch = e.target.value;
+            applyGiteeFilters(true);
+        });
+    }
+
+    // 每页条数切换
+    if (giteePageSizeSelect) {
+        giteePageSizeSelect.addEventListener('change', (e) => {
+            giteeState.pageSize = parseInt(e.target.value, 10) || 20;
+            applyGiteeFilters(true);
+        });
+    }
+
+    // 刷新按钮
+    if (btnGiteeRefreshCommits) {
+        btnGiteeRefreshCommits.onclick = () => {
+            loadGiteeData(true, giteeState.isDemo);
+        };
+    }
+
+    // 更新授权/取消授权按钮状态
+    function updateGiteeAuthButtonState() {
+        if (!btnGiteeOpenAuthModal) return;
+        if (giteeState.authenticated) {
+            btnGiteeOpenAuthModal.innerHTML = '🚫 取消授权';
+            btnGiteeOpenAuthModal.title = '点击取消当前 Gitee 授权并清空已保存的凭据';
+            btnGiteeOpenAuthModal.classList.remove('btn-secondary');
+            btnGiteeOpenAuthModal.classList.add('btn-danger-ghost');
+        } else {
+            btnGiteeOpenAuthModal.innerHTML = '🔑 授权与企业配置';
+            btnGiteeOpenAuthModal.title = '配置或更换 Gitee Access Token 与所属企业';
+            btnGiteeOpenAuthModal.classList.remove('btn-danger-ghost');
+            btnGiteeOpenAuthModal.classList.add('btn-secondary');
+        }
+    }
+
+    // 取消 Gitee 授权连接
+    async function handleGiteeDisconnect() {
+        if (!confirm('确定要取消当前 Gitee 授权连接吗？取消后需重新配置令牌。')) return;
+        try {
+            await fetch(apiUrl('/api/gitee/logout'), { method: 'POST' });
+            giteeState.authenticated = false;
+            giteeState.hasLoaded = false;
+            giteeState.user = null;
+            giteeState.enterprise = null;
+            giteeState.enterpriseMemberId = null;
+            giteeState.stats = null;
+            giteeState.repos = [];
+            giteeState.branches = [];
+            giteeState.commits = [];
+            giteeState.filteredCommits = [];
+            giteeState.selectedRepo = 'all';
+            giteeState.selectedBranch = 'all';
+            giteeState.searchKeyword = '';
+            if (giteeSearchInput) giteeSearchInput.value = '';
+            if (giteeSearchClear) giteeSearchClear.style.display = 'none';
+            if (giteeCommitBadge) giteeCommitBadge.style.display = 'none';
+            closeGiteeAuthModal();
+            updateGiteeAuthButtonState();
+            renderGiteeProfile();
+            renderGiteeStats();
+            renderGiteeRepoTags();
+            renderGiteeBranchFilterOptions();
+            applyGiteeFilters(true);
+            alert('已成功取消 Gitee 授权');
+        } catch (e) {
+            alert('取消授权异常: ' + e);
+        }
+    }
+
+    // =========================================================================
+    // 授权配置与模式切换弹窗
+    // =========================================================================
+    function openGiteeAuthModal() {
+        if (!giteeAuthModal) return;
+        giteeAuthModal.style.display = 'flex';
+        if (giteeState.authenticated && btnGiteeDisconnect) {
+            btnGiteeDisconnect.style.display = 'inline-block';
+        } else if (btnGiteeDisconnect) {
+            btnGiteeDisconnect.style.display = 'none';
+        }
+    }
+
+    function closeGiteeAuthModal() {
+        if (giteeAuthModal) giteeAuthModal.style.display = 'none';
+    }
+
+    if (btnGiteeOpenAuthModal) {
+        btnGiteeOpenAuthModal.onclick = () => {
+            if (giteeState.authenticated) {
+                handleGiteeDisconnect();
+            } else {
+                openGiteeAuthModal();
+            }
+        };
+    }
+    if (giteeAuthModalCloseBtn) {
+        giteeAuthModalCloseBtn.onclick = closeGiteeAuthModal;
+    }
+    if (giteeAuthCancelBtn) {
+        giteeAuthCancelBtn.onclick = closeGiteeAuthModal;
+    }
+
+    // 切换 Token 明文显示/隐藏
+    if (btnToggleGiteeToken && giteeTokenInput) {
+        btnToggleGiteeToken.onclick = () => {
+            if (giteeTokenInput.type === 'password') {
+                giteeTokenInput.type = 'text';
+                btnToggleGiteeToken.textContent = '🔒';
+            } else {
+                giteeTokenInput.type = 'password';
+                btnToggleGiteeToken.textContent = '👁️';
+            }
+        };
+    }
+
+    // 演示模式体验
+    if (btnGiteeDemoLogin) {
+        btnGiteeDemoLogin.onclick = async () => {
+            try {
+                btnGiteeDemoLogin.disabled = true;
+                btnGiteeDemoLogin.textContent = '正在进入演示模式...';
+                const res = await fetch(apiUrl('/api/gitee/auth'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ use_demo: true })
+                });
+                const data = await res.json();
+                if (data.code === 200) {
+                    closeGiteeAuthModal();
+                    await loadGiteeData(true, true);
+                    updateGiteeAuthButtonState();
+                } else {
+                    alert('切换演示模式失败: ' + data.message);
+                }
+            } catch (e) {
+                alert('切换演示模式异常: ' + e);
+            } finally {
+                btnGiteeDemoLogin.disabled = false;
+                btnGiteeDemoLogin.textContent = '✨ 使用演示数据体验';
+            }
+        };
+    }
+
+    // 提交 Token 授权连接
+    if (giteeAuthSubmitBtn) {
+        giteeAuthSubmitBtn.onclick = async () => {
+            const token = (giteeTokenInput ? giteeTokenInput.value : '').trim();
+            const enterprise = (giteeEnterpriseInput ? giteeEnterpriseInput.value : '').trim();
+
+            if (!token) {
+                alert('请输入您的 Gitee Access Token 私人令牌');
+                if (giteeTokenInput) giteeTokenInput.focus();
+                return;
+            }
+
+            try {
+                giteeAuthSubmitBtn.disabled = true;
+                giteeAuthSubmitBtn.textContent = '正在校验令牌与权限...';
+
+                const res = await fetch(apiUrl('/api/gitee/auth'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token, enterprise })
+                });
+                const data = await res.json();
+
+                if (data.code === 200) {
+                    closeGiteeAuthModal();
+                    if (giteeTokenInput) giteeTokenInput.value = '';
+                    await loadGiteeData(true, false);
+                    updateGiteeAuthButtonState();
+                } else {
+                    alert('授权验证失败: ' + (data.message || 'Token 无效或权限不足'));
+                }
+            } catch (e) {
+                alert('授权网络请求异常: ' + e);
+            } finally {
+                giteeAuthSubmitBtn.disabled = false;
+                giteeAuthSubmitBtn.textContent = '🔑 验证并授权连接';
+            }
+        };
+    }
+
+    // 断开 Gitee 连接
+    if (btnGiteeDisconnect) {
+        btnGiteeDisconnect.onclick = handleGiteeDisconnect;
+    }
+
+    // =========================================================================
+    // 模块：Gitee Commit 记录 AI 汇总与任务工单生成 (套用任务模板.xlsx)
+    // =========================================================================
+    const btnOpenGiteeAiTaskModal = document.getElementById('btnOpenGiteeAiTaskModal');
+    const giteeAiTaskModal = document.getElementById('giteeAiTaskModal');
+    const giteeAiTaskModalCloseBtn = document.getElementById('giteeAiTaskModalCloseBtn');
+    const giteeAiTaskModalCancelBtn = document.getElementById('giteeAiTaskModalCancelBtn');
+    const giteeTaskStartDate = document.getElementById('giteeTaskStartDate');
+    const giteeTaskEndDate = document.getElementById('giteeTaskEndDate');
+    const giteeTaskQuickPresets = document.getElementById('giteeTaskQuickPresets');
+    const giteeTaskRepoSelect = document.getElementById('giteeTaskRepoSelect');
+    const giteeTaskProjectInput = document.getElementById('giteeTaskProjectInput');
+    const giteeTaskAssigneeInput = document.getElementById('giteeTaskAssigneeInput');
+    const giteeTaskMatchedCount = document.getElementById('giteeTaskMatchedCount');
+    const btnStartGiteeAiTaskGen = document.getElementById('btnStartGiteeAiTaskGen');
+    const giteeAiTaskLoadingBox = document.getElementById('giteeAiTaskLoadingBox');
+    const giteeAiTaskResultArea = document.getElementById('giteeAiTaskResultArea');
+    const giteeTaskResDateRange = document.getElementById('giteeTaskResDateRange');
+    const giteeTaskResCommitCount = document.getElementById('giteeTaskResCommitCount');
+    const giteeTaskResTaskCount = document.getElementById('giteeTaskResTaskCount');
+    const giteeTaskResTotalHours = document.getElementById('giteeTaskResTotalHours');
+    const giteeTaskResSourceTag = document.getElementById('giteeTaskResSourceTag');
+    const btnAiTaskAddRow = document.getElementById('btnAiTaskAddRow');
+    const btnAiTaskQuickDownload = document.getElementById('btnAiTaskQuickDownload');
+    const btnAiTaskConfirmDownload = document.getElementById('btnAiTaskConfirmDownload');
+    const btnAiTaskImportToZentao = document.getElementById('btnAiTaskImportToZentao');
+    const btnAiTaskFooterImportToZentao = document.getElementById('btnAiTaskFooterImportToZentao');
+    const giteeAiTaskTableBody = document.getElementById('giteeAiTaskTableBody');
+
+    const giteeAiTaskState = {
+        startDate: '',
+        endDate: '',
+        selectedRepo: 'all',
+        matchedCommits: [],
+        generatedTasks: [],
+        downloadUrl: null,
+        downloadFilename: null,
+        isGenerating: false,
+        hasModified: false
+    };
+
+    function formatAiTaskYMD(d) {
+        if (!d) return '';
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+    }
+
+    function applyAiTaskDatePreset(presetKey) {
+        const today = new Date();
+        let sDate = '';
+        let eDate = formatAiTaskYMD(today);
+
+        if (presetKey === '7d') {
+            const past7 = new Date();
+            past7.setDate(today.getDate() - 6);
+            sDate = formatAiTaskYMD(past7);
+        } else if (presetKey === 'week') {
+            const dayOfWeek = today.getDay() || 7; // 1=Mon, 7=Sun
+            const monday = new Date(today);
+            monday.setDate(today.getDate() - (dayOfWeek - 1));
+            sDate = formatAiTaskYMD(monday);
+        } else if (presetKey === '14d') {
+            const past14 = new Date();
+            past14.setDate(today.getDate() - 13);
+            sDate = formatAiTaskYMD(past14);
+        } else if (presetKey === '30d') {
+            const past30 = new Date();
+            past30.setDate(today.getDate() - 29);
+            sDate = formatAiTaskYMD(past30);
+        } else if (presetKey === 'all') {
+            sDate = '';
+            eDate = '';
+        }
+
+        if (giteeTaskStartDate) giteeTaskStartDate.value = sDate;
+        if (giteeTaskEndDate) giteeTaskEndDate.value = eDate;
+        giteeAiTaskState.startDate = sDate;
+        giteeAiTaskState.endDate = eDate;
+
+        // 更新快速标签高亮
+        if (giteeTaskQuickPresets) {
+            giteeTaskQuickPresets.querySelectorAll('.preset-chip').forEach(btn => {
+                if (btn.getAttribute('data-preset') === presetKey) {
+                    btn.classList.add('active');
+                } else {
+                    btn.classList.remove('active');
+                }
+            });
+        }
+
+        updateAiTaskMatchedCount();
+    }
+
+    function updateAiTaskMatchedCount() {
+        const s = (giteeTaskStartDate ? giteeTaskStartDate.value : '').trim();
+        const e = (giteeTaskEndDate ? giteeTaskEndDate.value : '').trim();
+        const repo = giteeTaskRepoSelect ? giteeTaskRepoSelect.value : 'all';
+
+        giteeAiTaskState.startDate = s;
+        giteeAiTaskState.endDate = e;
+        giteeAiTaskState.selectedRepo = repo;
+
+        const allCommits = giteeState.commits || [];
+        const matched = allCommits.filter(c => {
+            const rawDate = c.created_at || c.timestamp || '';
+            const cDate = rawDate.slice(0, 10);
+            if (s && cDate && cDate < s) return false;
+            if (e && cDate && cDate > e) return false;
+            if (repo !== 'all' && c.repo_path !== repo && c.repo_name !== repo) return false;
+            return true;
+        });
+
+        giteeAiTaskState.matchedCommits = matched;
+        if (giteeTaskMatchedCount) {
+            giteeTaskMatchedCount.textContent = matched.length;
+        }
+    }
+
+    function openGiteeAiTaskModal() {
+        if (!giteeAiTaskModal) return;
+        giteeAiTaskModal.style.display = 'flex';
+
+        // 填充仓库下拉选项
+        if (giteeTaskRepoSelect) {
+            let optionsHtml = '<option value="all">全部仓库 (聚合分析)</option>';
+            (giteeState.repos || []).forEach(r => {
+                const val = r.path || r.name;
+                const name = r.name || r.path;
+                const isSelected = (giteeState.selectedRepo !== 'all' && (giteeState.selectedRepo === val || giteeState.selectedRepo === name)) ? 'selected' : '';
+                optionsHtml += `<option value="${escapeGiteeHtml(val)}" ${isSelected}>${escapeGiteeHtml(name)} (${r.count}次提交)</option>`;
+            });
+            giteeTaskRepoSelect.innerHTML = optionsHtml;
+        }
+
+        // 默认按本周设置时间
+        applyAiTaskDatePreset('week');
+    }
+
+    function closeGiteeAiTaskModal() {
+        if (giteeAiTaskModal) giteeAiTaskModal.style.display = 'none';
+    }
+
+    // 绑定模态框开关
+    if (btnOpenGiteeAiTaskModal) {
+        btnOpenGiteeAiTaskModal.onclick = openGiteeAiTaskModal;
+    }
+    if (giteeAiTaskModalCloseBtn) {
+        giteeAiTaskModalCloseBtn.onclick = closeGiteeAiTaskModal;
+    }
+    if (giteeAiTaskModalCancelBtn) {
+        giteeAiTaskModalCancelBtn.onclick = closeGiteeAiTaskModal;
+    }
+
+    // 日期预设按钮点击
+    if (giteeTaskQuickPresets) {
+        giteeTaskQuickPresets.querySelectorAll('.preset-chip').forEach(btn => {
+            btn.onclick = () => {
+                const preset = btn.getAttribute('data-preset');
+                applyAiTaskDatePreset(preset);
+            };
+        });
+    }
+
+    // 日期输入与仓库切换联动
+    if (giteeTaskStartDate) {
+        giteeTaskStartDate.addEventListener('change', () => {
+            if (giteeTaskQuickPresets) {
+                giteeTaskQuickPresets.querySelectorAll('.preset-chip').forEach(b => b.classList.remove('active'));
+            }
+            updateAiTaskMatchedCount();
+        });
+    }
+    if (giteeTaskEndDate) {
+        giteeTaskEndDate.addEventListener('change', () => {
+            if (giteeTaskQuickPresets) {
+                giteeTaskQuickPresets.querySelectorAll('.preset-chip').forEach(b => b.classList.remove('active'));
+            }
+            updateAiTaskMatchedCount();
+        });
+    }
+    if (giteeTaskRepoSelect) {
+        giteeTaskRepoSelect.addEventListener('change', updateAiTaskMatchedCount);
+    }
+
+    // 开始触发 AI 智能汇总
+    if (btnStartGiteeAiTaskGen) {
+        btnStartGiteeAiTaskGen.onclick = async () => {
+            updateAiTaskMatchedCount();
+            if (giteeAiTaskState.matchedCommits.length === 0) {
+                if (!confirm('所选时间段内未匹配到当前本地已加载的代码提交记录。是否仍要尝试从后端拉取并生成任务工单？')) {
+                    return;
+                }
+            }
+
+            const projectName = (giteeTaskProjectInput ? giteeTaskProjectInput.value : '').trim() || '智慧医疗便民服务平台项目';
+            const assignee = (giteeTaskAssigneeInput ? giteeTaskAssigneeInput.value : '').trim() || '张开发(#dev_user)';
+            const apiKey = localStorage.getItem('zentao_deepseek_api_key') || (document.getElementById('inputDeepSeekKey') ? document.getElementById('inputDeepSeekKey').value.trim() : '');
+
+            // 切换为 Loading 状态
+            if (giteeAiTaskLoadingBox) giteeAiTaskLoadingBox.style.display = 'block';
+            if (giteeAiTaskResultArea) giteeAiTaskResultArea.style.display = 'none';
+            if (btnAiTaskConfirmDownload) btnAiTaskConfirmDownload.style.display = 'none';
+            if (btnAiTaskFooterImportToZentao) btnAiTaskFooterImportToZentao.style.display = 'none';
+            btnStartGiteeAiTaskGen.disabled = true;
+
+            try {
+                const res = await fetch(apiUrl('/api/gitee/ai_tasks/generate'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        start_date: giteeAiTaskState.startDate,
+                        end_date: giteeAiTaskState.endDate,
+                        repo: giteeAiTaskState.selectedRepo,
+                        project_name: projectName,
+                        assigned_to: assignee,
+                        api_key: apiKey,
+                        commits: giteeAiTaskState.matchedCommits
+                    })
+                });
+                const data = await res.json();
+
+                if (data.code !== 200 || !data.success) {
+                    throw new Error(data.message || '生成任务失败');
+                }
+
+                giteeAiTaskState.generatedTasks = data.tasks || [];
+                giteeAiTaskState.downloadUrl = data.download_url;
+                giteeAiTaskState.downloadFilename = data.download_filename;
+                giteeAiTaskState.hasModified = false;
+
+                // 填充统计指标
+                if (giteeTaskResDateRange) giteeTaskResDateRange.textContent = data.date_range || '全周期';
+                if (giteeTaskResCommitCount) giteeTaskResCommitCount.textContent = data.commits_count || 0;
+                if (giteeTaskResTaskCount) giteeTaskResTaskCount.textContent = (data.tasks || []).length;
+                if (giteeTaskResTotalHours) giteeTaskResTotalHours.textContent = data.total_estimate || 0;
+
+                // 模式标签
+                if (giteeTaskResSourceTag) {
+                    if (data.source === 'deepseek-agent') {
+                        giteeTaskResSourceTag.textContent = '🤖 DeepSeek AI Agent 深度提炼';
+                        giteeTaskResSourceTag.style.background = '#f5f3ff';
+                        giteeTaskResSourceTag.style.color = '#6d28d9';
+                    } else {
+                        giteeTaskResSourceTag.textContent = '⚡ 智能启发式聚类提炼';
+                        giteeTaskResSourceTag.style.background = '#ecfdf5';
+                        giteeTaskResSourceTag.style.color = '#047857';
+                    }
+                }
+
+                // 渲染预览表格
+                renderAiTaskPreviewTable();
+
+                if (giteeAiTaskResultArea) giteeAiTaskResultArea.style.display = 'block';
+                if (btnAiTaskConfirmDownload) btnAiTaskConfirmDownload.style.display = 'inline-block';
+                if (btnAiTaskFooterImportToZentao) btnAiTaskFooterImportToZentao.style.display = 'inline-block';
+
+            } catch (e) {
+                alert('AI 任务生成异常: ' + (e.message || e));
+            } finally {
+                if (giteeAiTaskLoadingBox) giteeAiTaskLoadingBox.style.display = 'none';
+                btnStartGiteeAiTaskGen.disabled = false;
+            }
+        };
+    }
+
+    // 渲染预览任务表格
+    function renderAiTaskPreviewTable() {
+        if (!giteeAiTaskTableBody) return;
+        const tasks = giteeAiTaskState.generatedTasks || [];
+
+        if (tasks.length === 0) {
+            giteeAiTaskTableBody.innerHTML = `<tr><td colspan="12" style="text-align: center; color: #94a3b8; padding: 24px;">未提炼出任务工单</td></tr>`;
+            return;
+        }
+
+        giteeAiTaskTableBody.innerHTML = tasks.map((t, idx) => {
+            const types = ['开发', '测试', '运维', '设计', '其他'];
+            const typeOpts = types.map(tp => `<option value="${tp}" ${tp === t.type ? 'selected' : ''}>${tp}</option>`).join('');
+            const pris = [1, 2, 3, 4];
+            const priOpts = pris.map(p => `<option value="${p}" ${p === Number(t.pri) ? 'selected' : ''}>${p}</option>`).join('');
+
+            return `
+                <tr data-row-idx="${idx}">
+                    <td style="text-align: center; font-weight: 600; color: #64748b;">${idx + 1}</td>
+                    <td><input type="text" class="task-cell-input" data-field="project" value="${escapeGiteeHtml(t.project || '')}"></td>
+                    <td><input type="text" class="task-cell-input" data-field="module" value="${escapeGiteeHtml(t.module || '')}" placeholder="所属模块"></td>
+                    <td><input type="text" class="task-cell-input" data-field="assigned_to" value="${escapeGiteeHtml(t.assigned_to || '')}"></td>
+                    <td><input type="text" class="task-cell-input" data-field="name" value="${escapeGiteeHtml(t.name || '')}" style="font-weight: 500;"></td>
+                    <td><textarea class="task-cell-textarea" data-field="desc" rows="2">${escapeGiteeHtml(t.desc || '')}</textarea></td>
+                    <td><select class="task-cell-select" data-field="type">${typeOpts}</select></td>
+                    <td><select class="task-cell-select" data-field="pri">${priOpts}</select></td>
+                    <td><input type="number" class="task-cell-input" data-field="estimate" value="${t.estimate || 2}" min="0.5" step="0.5" style="width: 60px;"></td>
+                    <td><input type="date" class="task-cell-input" data-field="est_started" value="${escapeGiteeHtml(t.est_started || '')}"></td>
+                    <td><input type="date" class="task-cell-input" data-field="deadline" value="${escapeGiteeHtml(t.deadline || '')}"></td>
+                    <td style="text-align: center;">
+                        <button type="button" class="btn-task-row-del" data-del-row="${idx}" title="删除该条任务">&times;</button>
+                    </td>
+                </tr>
+            `;
+        }).join('');
+
+        // 重新计算总工时
+        calcAiTaskTotalHours();
+
+        // 绑定单元格编辑事件
+        giteeAiTaskTableBody.querySelectorAll('[data-field]').forEach(el => {
+            el.addEventListener('input', (e) => {
+                const tr = e.target.closest('tr');
+                if (!tr) return;
+                const idx = parseInt(tr.getAttribute('data-row-idx'), 10);
+                const field = e.target.getAttribute('data-field');
+                let val = e.target.value;
+                if (field === 'estimate') val = parseFloat(val) || 0;
+                if (field === 'pri') val = parseInt(val, 10) || 3;
+                if (giteeAiTaskState.generatedTasks[idx]) {
+                    giteeAiTaskState.generatedTasks[idx][field] = val;
+                    giteeAiTaskState.hasModified = true;
+                }
+                if (field === 'estimate') {
+                    calcAiTaskTotalHours();
+                }
+            });
+        });
+
+        // 绑定行删除事件
+        giteeAiTaskTableBody.querySelectorAll('[data-del-row]').forEach(btn => {
+            btn.onclick = () => {
+                const idx = parseInt(btn.getAttribute('data-del-row'), 10);
+                giteeAiTaskState.generatedTasks.splice(idx, 1);
+                giteeAiTaskState.hasModified = true;
+                renderAiTaskPreviewTable();
+                if (giteeTaskResTaskCount) {
+                    giteeTaskResTaskCount.textContent = giteeAiTaskState.generatedTasks.length;
+                }
+            };
+        });
+    }
+
+    function calcAiTaskTotalHours() {
+        const total = (giteeAiTaskState.generatedTasks || []).reduce((acc, t) => acc + (parseFloat(t.estimate) || 0), 0);
+        if (giteeTaskResTotalHours) {
+            giteeTaskResTotalHours.textContent = Math.round(total * 10) / 10;
+        }
+    }
+
+    // 添加任务项
+    if (btnAiTaskAddRow) {
+        btnAiTaskAddRow.onclick = () => {
+            const defaultProj = (giteeTaskProjectInput ? giteeTaskProjectInput.value : '').trim() || '智慧医疗便民服务平台项目';
+            const defaultAssignee = (giteeTaskAssigneeInput ? giteeTaskAssigneeInput.value : '').trim() || '张开发(#dev_user)';
+            const todayStr = formatAiTaskYMD(new Date());
+
+            giteeAiTaskState.generatedTasks.push({
+                project: defaultProj,
+                module: '业务开发',
+                story: '',
+                assigned_to: defaultAssignee,
+                name: '新任务名称',
+                desc: '任务描述与工作内容',
+                type: '开发',
+                pri: 3,
+                estimate: 4,
+                est_started: giteeAiTaskState.startDate || todayStr,
+                deadline: giteeAiTaskState.endDate || todayStr
+            });
+            giteeAiTaskState.hasModified = true;
+            renderAiTaskPreviewTable();
+            if (giteeTaskResTaskCount) {
+                giteeTaskResTaskCount.textContent = giteeAiTaskState.generatedTasks.length;
+            }
+        };
+    }
+
+    // 下载 Excel 工单文件
+    async function triggerAiTaskExcelDownload() {
+        const tasks = giteeAiTaskState.generatedTasks || [];
+        if (tasks.length === 0) {
+            alert('当前没有可导出的任务工单');
+            return;
+        }
+
+        // 若用户在表格中微调过任务或尚未生成下载链接，则重新触发后端 Excel 导出
+        if (giteeAiTaskState.hasModified || !giteeAiTaskState.downloadUrl) {
+            try {
+                const res = await fetch(apiUrl('/api/gitee/ai_tasks/export'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        tasks: tasks,
+                        filename: giteeAiTaskState.downloadFilename
+                    })
+                });
+                const data = await res.json();
+                if (data.code === 200 && data.download_url) {
+                    giteeAiTaskState.downloadUrl = data.download_url;
+                    giteeAiTaskState.downloadFilename = data.download_filename;
+                    giteeAiTaskState.hasModified = false;
+                } else {
+                    throw new Error(data.message || '导出 Excel 失败');
+                }
+            } catch (e) {
+                alert('导出 Excel 异常: ' + e);
+                return;
+            }
+        }
+
+        // 触发浏览器直接下载
+        if (giteeAiTaskState.downloadUrl) {
+            const a = document.createElement('a');
+            a.href = apiUrl(giteeAiTaskState.downloadUrl);
+            a.download = giteeAiTaskState.downloadFilename || '任务工单.xlsx';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+    }
+
+    if (btnAiTaskQuickDownload) {
+        btnAiTaskQuickDownload.onclick = triggerAiTaskExcelDownload;
+    }
+    if (btnAiTaskConfirmDownload) {
+        btnAiTaskConfirmDownload.onclick = triggerAiTaskExcelDownload;
+    }
+
+    // 直接一键导入到禅道任务
+    async function handleDirectImportToZentao() {
+        const tasks = giteeAiTaskState.generatedTasks || [];
+        if (tasks.length === 0) {
+            alert('当前没有可导入的任务工单');
+            return;
+        }
+
+        const projectName = (giteeTaskProjectInput ? giteeTaskProjectInput.value : '').trim() || '智慧医疗便民服务平台项目';
+        if (!confirm(`确定要将当前表格中的 ${tasks.length} 项任务，直接创建并导入到禅道项目【${projectName}】中吗？`)) {
+            return;
+        }
+
+        const setButtonsLoading = (isLoading) => {
+            if (btnAiTaskImportToZentao) {
+                btnAiTaskImportToZentao.disabled = isLoading;
+                btnAiTaskImportToZentao.textContent = isLoading ? '⏳ 正在直接导入...' : '🚀 直接导入到禅道任务';
+            }
+            if (btnAiTaskFooterImportToZentao) {
+                btnAiTaskFooterImportToZentao.disabled = isLoading;
+                btnAiTaskFooterImportToZentao.textContent = isLoading ? '⏳ 正在直接导入...' : '🚀 直接导入到禅道任务';
+            }
+        };
+
+        setButtonsLoading(true);
+
+        try {
+            const res = await fetch(apiUrl('/api/gitee/ai_tasks/import_to_zentao'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    tasks: tasks,
+                    project_name: projectName
+                })
+            });
+            const data = await res.json();
+
+            if (res.status === 401 || (!data.success && data.code === 401)) {
+                alert('提示：' + (data.message || '请先在系统顶部登录禅道账号，再执行直接导入。'));
+                const loginBtn = document.getElementById('btnLogin');
+                if (loginBtn) loginBtn.click();
+                return;
+            }
+
+            if (data.code !== 200 || !data.success) {
+                throw new Error(data.message || '导入任务失败');
+            }
+
+            const succCount = data.success_count || 0;
+            const failCount = data.failed_count || 0;
+            const zentaoBase = (data.zentao_base_url || '').replace(/\/+$/, '');
+
+            const detailList = (data.results || []).map(r => {
+                const icon = r.success ? '✅' : '❌';
+                const idTag = r.id ? `<span style="display:inline-block; padding: 1px 6px; background: #e0f2fe; color: #0284c7; border-radius: 4px; font-weight: 600; font-family: monospace; font-size: 11px; margin-right: 6px;">#${r.id}</span>` : '';
+                const link = (r.id && zentaoBase) ? `<a href="${zentaoBase}/task-view-${r.id}.html" target="_blank" style="margin-left: 8px; color: #2563eb; text-decoration: underline; font-size: 12px; white-space: nowrap;">查看任务 &rarr;</a>` : '';
+                return `<li style="margin-bottom: 6px; padding: 6px 10px; background: #fff; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; align-items: center; justify-content: space-between;">
+                    <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80%;">
+                        ${icon} ${idTag}<strong>${escapeGiteeHtml(r.name)}</strong>
+                        <span style="color: ${r.success ? '#16a34a' : '#dc2626'}; font-size: 11px; margin-left: 6px;">${escapeGiteeHtml(r.message)}</span>
+                    </div>
+                    <div>${link}</div>
+                </li>`;
+            }).join('');
+
+            showModal('禅道任务直接导入完成', `
+                <div style="line-height: 1.6;">
+                    <div style="font-size: 15px; font-weight: 600; color: #15803d; margin-bottom: 8px;">
+                        🎉 ${escapeGiteeHtml(data.message)}
+                    </div>
+                    <div style="font-size: 13px; color: #475569; margin-bottom: 10px;">
+                        目标项目：<strong>${escapeGiteeHtml(data.project_name || projectName)}</strong> (ID: ${data.project_id || '178'})
+                    </div>
+                    <ul style="max-height: 280px; overflow-y: auto; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px; font-size: 12px; list-style: none; margin: 0 0 10px 0;">
+                        ${detailList}
+                    </ul>
+                    <div style="font-size: 12px; color: #64748b;">
+                        提示：任务已在禅道中正式创建，初始状态为待办。左侧“我的待办任务”列表已同步刷新。
+                    </div>
+                </div>
+            `);
+
+            // 标记按钮为已导入
+            if (btnAiTaskImportToZentao) {
+                btnAiTaskImportToZentao.innerHTML = '✅ 已成功导入禅道';
+                btnAiTaskImportToZentao.classList.remove('btn-success');
+                btnAiTaskImportToZentao.classList.add('btn-secondary');
+            }
+            if (btnAiTaskFooterImportToZentao) {
+                btnAiTaskFooterImportToZentao.innerHTML = '✅ 已成功导入禅道';
+                btnAiTaskFooterImportToZentao.classList.remove('btn-success');
+                btnAiTaskFooterImportToZentao.classList.add('btn-secondary');
+            }
+
+            // 自动刷新左侧任务列表
+            loadMyActiveTasks();
+
+        } catch (e) {
+            alert('直接导入禅道异常: ' + (e.message || e));
+        } finally {
+            setButtonsLoading(false);
+        }
+    }
+
+    if (btnAiTaskImportToZentao) {
+        btnAiTaskImportToZentao.onclick = handleDirectImportToZentao;
+    }
+    if (btnAiTaskFooterImportToZentao) {
+        btnAiTaskFooterImportToZentao.onclick = handleDirectImportToZentao;
+    }
+
     // 初始化加载 AI 对话多会话
     initAiSessions();
 
@@ -5884,6 +7321,8 @@ document.addEventListener('DOMContentLoaded', () => {
     initFilterUserSelect();
     initPTabFinishedBySelect();
     checkStatus();
+    checkGiteeStatusQuietly();
+    updateGiteeAuthButtonState();
     loadGroups();
     loadMyActiveTasks();
 });

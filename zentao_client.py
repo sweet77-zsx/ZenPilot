@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 禅道 API 客户端核心模块 (ZenTao Client Core)
-封装博科国信云禅道及标准禅道系统的 API 调用。
+封装企业云禅道及标准开源版/企业版/旗舰版禅道系统的 API 调用。
 """
 
 import os
@@ -583,6 +583,94 @@ class ZentaoClient:
             return True, "指派修改成功"
 
         return res.status_code == 200, "提交完成"
+
+    def create_task(self, project_id, name, desc="", task_type="devel", pri=3, estimate=2.0,
+                    assigned_to=None, est_started="", deadline="", module_id="0", story_id="0"):
+        """
+        在指定禅道项目中创建新任务
+        :param project_id: 项目ID (如 '178')
+        :param name: 任务名称
+        :param desc: 任务描述 (文本或 HTML)
+        :param task_type: 任务类型 ('devel', 'test', 'design', 'ui', 'request', 'deploy', 'review', 'study', 'affair', 'misc')
+        :param pri: 优先级 1-4
+        :param estimate: 最初预计工时
+        :param assigned_to: 指派人账号 (如 'dev_user'，若包含 '(#...)' 则自动提取真实账号)
+        :param est_started: 预计开始日期 (YYYY-MM-DD)
+        :param deadline: 截止日期 (YYYY-MM-DD)
+        :param module_id: 所属模块ID，默认 '0'
+        :param story_id: 相关需求ID，默认 '0'
+        :return: (ok: bool, message: str, task_info: dict)
+        """
+        # 映射中文类型为禅道内置英文字典
+        type_mapping = {
+            '开发': 'devel',
+            '测试': 'test',
+            '设计': 'design',
+            '界面': 'ui',
+            '需求': 'request',
+            '部署': 'deploy',
+            '运维': 'deploy',
+            '评审': 'review',
+            '研究': 'study',
+            '事务': 'affair',
+            '其他': 'misc'
+        }
+        actual_type = type_mapping.get(task_type, task_type) if task_type else 'devel'
+
+        # 清洗指派人，例如 "张开发(#dev_user)" -> "dev_user"
+        clean_assigned = (assigned_to or self.account).strip()
+        match_acc = re.search(r'\(#([a-zA-Z0-9_\-\.]+)\)', clean_assigned)
+        if match_acc:
+            clean_assigned = match_acc.group(1)
+        elif '#' in clean_assigned:
+            clean_assigned = clean_assigned.split('#')[-1].replace(')', '').strip()
+
+        # 格式化描述
+        html_desc = desc or ""
+        if html_desc and not html_desc.strip().startswith('<p>'):
+            paragraphs = [f"<p>{p.strip()}</p>" for p in html_desc.split('\n') if p.strip()]
+            html_desc = "".join(paragraphs) if paragraphs else f"<p>{desc}</p>"
+
+        url = f"{self.base_url}/task-create-{project_id}.json"
+        payload = {
+            "project": str(project_id),
+            "type": actual_type,
+            "module": str(module_id or "0"),
+            "story": str(story_id or "0"),
+            "assignedTo[]": clean_assigned,
+            "name": name.strip(),
+            "pri": str(pri or 3),
+            "estimate": str(estimate or 2),
+            "estStarted": str(est_started or ""),
+            "deadline": str(deadline or ""),
+            "desc": html_desc,
+            "status": "wait"
+        }
+
+        try:
+            res = self._req('POST', url, data=payload, timeout=15)
+            try:
+                res_json = res.json()
+            except Exception:
+                res_json = {}
+
+            if res_json.get("result") == "success" or res_json.get("status") == "success" or "保存成功" in res.text:
+                return True, "创建成功", {"name": name, "project": project_id, "assignedTo": clean_assigned}
+            else:
+                msg = res_json.get("message")
+                if isinstance(msg, dict):
+                    err_msgs = []
+                    for k, v in msg.items():
+                        if isinstance(v, list):
+                            err_msgs.extend(v)
+                        else:
+                            err_msgs.append(str(v))
+                    msg_str = "; ".join(err_msgs)
+                else:
+                    msg_str = str(msg or res.text[:200])
+                return False, msg_str, {}
+        except Exception as e:
+            return False, f"网络请求异常: {str(e)}", {}
 
     def _get_task_edit_form_data(self, task_id):
         """

@@ -13,7 +13,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="static/css/style.css?v=28">
+    <link rel="stylesheet" href="static/css/style.css?v=29">
 </head>
 <body>
     <div class="app-container">
@@ -34,10 +34,10 @@
                     <span id="statusText">连接检测中...</span>
                 </div>
                 <div class="user-chip" id="userChip" style="display: none; cursor: pointer;" title="点击管理账号/切换登录人">
-                    <span class="user-avatar" id="userAvatar">王</span>
+                    <span class="user-avatar" id="userAvatar">张</span>
                     <div class="user-meta">
-                        <strong id="userRealname">王淋淼</strong>
-                        <span id="userAccount">wanglinmiao</span>
+                        <strong id="userRealname">张开发</strong>
+                        <span id="userAccount">dev_user</span>
                     </div>
                 </div>
                 <button class="btn btn-secondary btn-sm" id="btnTopManageGroups" title="配置团队分组与组员">👥 团队分组</button>
@@ -65,6 +65,11 @@
             <button class="tab-item" data-tab="tab-weekly-report">
                 <span class="tab-icon">📊</span>
                 <span class="tab-title">本周工作周报</span>
+            </button>
+            <button class="tab-item" data-tab="tab-gitee-commits" id="tabBtnGiteeCommits">
+                <span class="tab-icon">🐱</span>
+                <span class="tab-title">Gitee 提交记录</span>
+                <span class="badge" id="giteeCommitBadge" style="display: none;">0</span>
             </button>
         </nav>
 
@@ -269,6 +274,7 @@
                             <div class="quick-select-btns">
                                 <button class="btn btn-text btn-xs" id="btnSelectAll">全选所有结果</button>
                                 <button class="btn btn-text btn-xs" id="btnDeselectAll">取消全选</button>
+                                <a href="/static/js/zentao_batch_helper.user.js" target="_blank" class="btn btn-text btn-xs" style="color: #2563eb; text-decoration: none;" title="直接在禅道网页端一键批量操作，支持油猴/Tampermonkey安装">📜 网页油猴脚本</a>
                             </div>
                         </div>
                         <div class="config-editor">
@@ -456,6 +462,7 @@
                                 <div class="quick-select-btns">
                                     <button type="button" class="btn btn-text btn-xs" id="btnPTabSelectAll">全选所有结果</button>
                                     <button type="button" class="btn btn-text btn-xs" id="btnPTabDeselectAll">取消全选</button>
+                                    <a href="/static/js/zentao_batch_helper.user.js" target="_blank" class="btn btn-text btn-xs" style="color: #2563eb; text-decoration: none;" title="直接在禅道网页端一键批量操作，支持油猴/Tampermonkey安装">📜 网页油猴脚本</a>
                                 </div>
                             </div>
                             <div class="config-editor">
@@ -604,6 +611,222 @@
                     </div>
                 </div>
             </section>
+
+            <!-- TAB 5: Gitee 代码提交记录看板 -->
+            <section class="tab-content" id="tab-gitee-commits">
+                <div class="action-card gitee-dashboard-card">
+                    <!-- 顶部主标题栏与操作按钮区 -->
+                    <div class="card-header gitee-main-header">
+                        <div class="card-title-group">
+                            <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                                <h2 style="margin: 0; display: flex; align-items: center; gap: 8px;">
+                                    <span class="gitee-cat-logo">🐱</span>
+                                    <span>Gitee 代码提交记录看板</span>
+                                </h2>
+                                <span class="gitee-mode-badge" id="giteeModeBadge" title="当前数据模式">
+                                    <span class="dot-pulse"></span>
+                                    <span id="giteeModeText">实时在线</span>
+                                </span>
+                            </div>
+                            <p class="card-desc" style="margin-top: 4px;">
+                                对接 Gitee OpenAPI v5，实时穿透拉取当前授权用户在企业环境下的代码推送事件与 Commit 记录
+                            </p>
+                        </div>
+                        <div class="header-actions gitee-header-actions">
+                            <button type="button" class="btn btn-ai btn-sm" id="btnOpenGiteeAiTaskModal" title="根据选定时间范围内的代码提交，由 AI Agent 汇总分析并生成标准禅道任务工单">
+                                ✨ AI 汇总生成任务工单
+                            </button>
+                            <button type="button" class="btn btn-primary btn-sm" id="btnGiteeRefreshCommits" title="刷新获取最新的提交记录">
+                                🔄 刷新最新提交
+                            </button>
+                            <button type="button" class="btn btn-secondary btn-sm" id="btnGiteeOpenAuthModal" title="配置或更换 Gitee Access Token 与所属企业">
+                                🔑 授权与企业配置
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 顶部信息卡片区：左侧用户信息，右侧 4 项统计指标 -->
+                    <div class="gitee-top-dashboard">
+                        <!-- 用户与企业画像卡片 -->
+                        <div class="gitee-profile-card">
+                            <div class="gitee-profile-header">
+                                <div class="gitee-avatar-container">
+                                    <img id="giteeUserAvatarImg" src="" alt="Avatar" class="gitee-user-avatar" style="display: none;">
+                                    <div id="giteeUserAvatarFallback" class="gitee-avatar-fallback">张</div>
+                                    <span class="gitee-online-status" title="Gitee 已连接"></span>
+                                </div>
+                                <div class="gitee-profile-names">
+                                    <div class="gitee-name-row">
+                                        <h3 class="gitee-realname" id="giteeUserRealname">张开发</h3>
+                                        <span class="gitee-login-tag" id="giteeUserLogin">@dev_user</span>
+                                    </div>
+                                    <div class="gitee-enterprise-pill" id="giteeEnterprisePill" title="当前统计所属企业">
+                                        <span class="ent-icon">🏢</span>
+                                        <span id="giteeEnterpriseName">技术研发中心</span>
+                                        <span class="ent-tag-badge">企业版</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- 元数据标识栏：统计周期、企业ID、成员ID -->
+                            <div class="gitee-profile-meta-grid">
+                                <div class="profile-meta-item">
+                                    <span class="meta-label">统计周期</span>
+                                    <span class="meta-value" id="giteeMetaDateRange">2026-10-20 ~ 2026-10-27</span>
+                                </div>
+                                <div class="profile-meta-item">
+                                    <span class="meta-label">企业 ID</span>
+                                    <span class="meta-value code-font" id="giteeMetaEnterpriseId">100862</span>
+                                </div>
+                                <div class="profile-meta-item">
+                                    <span class="meta-label">成员 ID</span>
+                                    <span class="meta-value code-font" id="giteeMetaMemberId">982143</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 统计指标卡片网格 (4项指标) -->
+                        <div class="gitee-stat-grid">
+                            <!-- 指标 1: 活跃仓库数量 -->
+                            <div class="gitee-stat-card card-repos">
+                                <div class="stat-card-icon">📁</div>
+                                <div class="stat-card-content">
+                                    <span class="stat-card-label">活跃仓库数量</span>
+                                    <div class="stat-card-value-wrap">
+                                        <span class="stat-card-value" id="giteeStatActiveRepos">0</span>
+                                        <span class="stat-card-unit">个仓库</span>
+                                    </div>
+                                    <span class="stat-card-sub">有本人提交的项目库</span>
+                                </div>
+                            </div>
+                            <!-- 指标 2: 本周累计 Commit 次数 -->
+                            <div class="gitee-stat-card card-commits">
+                                <div class="stat-card-icon">💻</div>
+                                <div class="stat-card-content">
+                                    <span class="stat-card-label">本周累计 Commit 次数</span>
+                                    <div class="stat-card-value-wrap">
+                                        <span class="stat-card-value" id="giteeStatThisWeekCommits">0</span>
+                                        <span class="stat-card-unit">次提交</span>
+                                    </div>
+                                    <span class="stat-card-sub">周一至现在的代码提交</span>
+                                </div>
+                            </div>
+                            <!-- 指标 3: Push 推送事件总数 -->
+                            <div class="gitee-stat-card card-pushes">
+                                <div class="stat-card-icon">🚀</div>
+                                <div class="stat-card-content">
+                                    <span class="stat-card-label">Push 推送事件总数</span>
+                                    <div class="stat-card-value-wrap">
+                                        <span class="stat-card-value" id="giteeStatPushEvents">0</span>
+                                        <span class="stat-card-unit">次推送</span>
+                                    </div>
+                                    <span class="stat-card-sub">触发的 PushEvent 动态</span>
+                                </div>
+                            </div>
+                            <!-- 指标 4: 活跃开发分支数量 -->
+                            <div class="gitee-stat-card card-branches">
+                                <div class="stat-card-icon">🌿</div>
+                                <div class="stat-card-content">
+                                    <span class="stat-card-label">活跃开发分支数量</span>
+                                    <div class="stat-card-value-wrap">
+                                        <span class="stat-card-value" id="giteeStatActiveBranches">0</span>
+                                        <span class="stat-card-unit">条分支</span>
+                                    </div>
+                                    <span class="stat-card-sub">涵盖特性分支与主干</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 项目筛选栏：标签式筛选 + 检索框 -->
+                    <div class="gitee-filter-card">
+                        <div class="gitee-filter-top">
+                            <span class="filter-section-title">📦 项目仓库标签筛选:</span>
+                            <!-- 标签列表 -->
+                            <div class="gitee-repo-tags-wrapper" id="giteeRepoTagsWrapper">
+                                <button type="button" class="gitee-repo-tag-pill active" data-repo="all" id="giteeTagAllRepos">
+                                    全部仓库 (<span id="giteeTagAllCount">0</span>)
+                                </button>
+                                <div class="gitee-repo-tags-list" id="giteeRepoTagsList">
+                                    <!-- 动态渲染各项目仓库标签 -->
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 检索输入与多维过滤器 -->
+                        <div class="gitee-search-controls-row">
+                            <div class="gitee-search-box">
+                                <span class="search-icon">🔍</span>
+                                <input type="text" id="giteeSearchInput" class="form-control gitee-search-input" placeholder="根据提交信息 (标题/详情)、作者、Commit 哈希检索..." autocomplete="off">
+                                <button type="button" class="gitee-search-clear" id="giteeSearchClear" title="清空搜索" style="display: none;">&times;</button>
+                            </div>
+
+                            <div class="gitee-extra-filters">
+                                <select id="giteeCommitTypeFilter" class="form-control select-type-filter" title="按提交类型筛选">
+                                    <option value="all">🏷️ 全部提交类型</option>
+                                    <option value="FEAT">✨ FEAT (新功能/需求)</option>
+                                    <option value="FIX">🐛 FIX (缺陷修复)</option>
+                                    <option value="STYLE">💄 STYLE (样式/排版)</option>
+                                    <option value="REFACTOR">♻️ REFACTOR (重构/优化)</option>
+                                    <option value="PERF">⚡ PERF (性能加速)</option>
+                                    <option value="DOCS">📝 DOCS (文档说明)</option>
+                                    <option value="TEST">🧪 TEST (自动化测试)</option>
+                                    <option value="CHORE">🔧 CHORE (依赖/配置)</option>
+                                    <option value="MERGE">🔀 MERGE (分支合并)</option>
+                                </select>
+
+                                <select id="giteeBranchFilter" class="form-control select-branch-filter" title="按分支筛选">
+                                    <option value="all">🌿 全部分支</option>
+                                </select>
+                            </div>
+
+                            <div class="gitee-result-counter">
+                                共找到 <b id="giteeFilteredCount">0</b> 条提交记录
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 提交流水列表展示区 -->
+                    <div class="gitee-commits-container">
+                        <!-- 加载中动画 -->
+                        <div class="gitee-state-notice" id="giteeLoadingNotice" style="display: none;">
+                            <div class="tool-spinner" style="width: 24px; height: 24px; margin: auto; margin-bottom: 8px;"></div>
+                            <span>正在通过 Gitee OpenAPI 获取提交记录...</span>
+                        </div>
+
+                        <!-- 空数据提示 -->
+                        <div class="gitee-state-notice" id="giteeEmptyNotice" style="display: none;">
+                            <div style="font-size: 32px; margin-bottom: 6px;">🔍</div>
+                            <div style="font-weight: 600; color: #475569;">暂无匹配的代码提交记录</div>
+                            <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;" id="giteeEmptySubtext">可尝试清空关键字或切换全部仓库查看</div>
+                        </div>
+
+                        <!-- 提交流水条目容器 -->
+                        <div class="gitee-commits-stream" id="giteeCommitStreamList">
+                            <!-- 动态注入每条 Commit 流水 -->
+                        </div>
+
+                        <!-- 分页控制栏 -->
+                        <div class="gitee-pagination-bar" id="giteePaginationBar" style="display: none;">
+                            <div class="pagination-info">
+                                显示第 <span id="giteePageStartIdx">1</span> - <span id="giteePageEndIdx">10</span> 条，共 <span id="giteePageTotalCount">0</span> 条记录
+                            </div>
+                            <div class="pagination-controls">
+                                <div class="pagination-size-select">
+                                    <span>每页</span>
+                                    <select id="giteePageSizeSelect">
+                                        <option value="10">10条</option>
+                                        <option value="20" selected>20条</option>
+                                        <option value="50">50条</option>
+                                    </select>
+                                </div>
+                                <div class="pagination-buttons" id="giteePageButtons">
+                                    <!-- 动态分页按纽 -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
         </main>
 
         <!-- 全局模态弹窗 (Modal) -->
@@ -633,11 +856,11 @@
                     <form id="loginForm" onsubmit="return false;">
                         <div class="form-group" style="margin-bottom: 14px;">
                             <label>禅道系统地址</label>
-                            <input type="text" id="loginUrl" class="form-control" value="https://bkgtsoft.chandao.com" placeholder="https://...">
+                            <input type="text" id="loginUrl" class="form-control" placeholder="https://zentao.yourcompany.com">
                         </div>
                         <div class="form-group" style="margin-bottom: 14px;">
                             <label>登录账号</label>
-                            <input type="text" id="loginAccount" class="form-control" placeholder="请输入禅道账号 (如 wanglinmiao)">
+                            <input type="text" id="loginAccount" class="form-control" placeholder="请输入禅道账号 (如 dev_user)">
                         </div>
                         <div class="form-group" style="margin-bottom: 14px;">
                             <label>登录密码</label>
@@ -758,6 +981,210 @@
                 </div>
             </div>
         </div>
+
+        <!-- Gitee 授权登录与企业配置弹窗 -->
+        <div class="modal-backdrop" id="giteeAuthModal" style="display: none;">
+            <div class="modal-dialog" style="max-width: 500px;">
+                <div class="modal-header">
+                    <h3 class="modal-title" style="display: flex; align-items: center; gap: 8px;">
+                        <span>🐱 Gitee 开放 API 授权配置</span>
+                    </h3>
+                    <button class="modal-close" id="giteeAuthModalCloseBtn">&times;</button>
+                </div>
+                <div class="modal-body" style="padding: 18px 22px;">
+                    <form id="giteeAuthForm" onsubmit="return false;">
+                        <div class="form-group" style="margin-bottom: 14px;">
+                            <label style="font-weight: 600; font-size: 13px; margin-bottom: 4px; display: flex; justify-content: space-between;">
+                                <span>Gitee Access Token (私人令牌) <span style="color: #ef4444;">*</span></span>
+                                <a href="https://gitee.com/profile/personal_access_tokens" target="_blank" style="color: #2563eb; font-size: 12px; text-decoration: none;">
+                                    🔗 前往 Gitee 生成令牌 &rarr;
+                                </a>
+                            </label>
+                            <div class="password-input-wrapper">
+                                <input type="password" id="giteeTokenInput" class="form-control" placeholder="在此粘贴您的 Gitee 私人令牌 (需勾选 user_info, projects, enterprises 权限)" autocomplete="off">
+                                <button type="button" class="btn-toggle-pwd" id="btnToggleGiteeToken" title="切换显示/隐藏">👁️</button>
+                            </div>
+                            <span style="font-size: 11px; color: #64748b; margin-top: 4px; display: block;">
+                                凭据仅用于拉取您有权访问的企业代码提交记录，保存在您本地安全环境中
+                            </span>
+                        </div>
+
+                        <div class="form-group" style="margin-bottom: 14px;">
+                            <label style="font-weight: 600; font-size: 13px; margin-bottom: 4px; display: flex; justify-content: space-between;">
+                                <span>所属企业路径/ID (可选)</span>
+                                <span style="font-size: 11px; color: #94a3b8;">留空则自动检测您加入的企业</span>
+                            </label>
+                            <input type="text" id="giteeEnterpriseInput" class="form-control" placeholder="如: enterprise-org (企业英文路径或ID)">
+                            <div id="giteeDetectedEnterprises" style="display: none; margin-top: 6px; font-size: 12px;">
+                                <span style="color: #475569;">已识别的企业:</span>
+                                <div id="giteeEnterpriseChips" style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px;"></div>
+                            </div>
+                        </div>
+
+                        <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 10px 12px; font-size: 12px; color: #1e40af; line-height: 1.5; margin-bottom: 8px;">
+                            💡 <strong>提示</strong>：您也可以直接点击下方【使用演示数据体验】快速浏览全套 UI 视图与统计报表。
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
+                    <button class="btn btn-secondary btn-sm" id="btnGiteeDemoLogin">✨ 使用演示数据体验</button>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-danger-ghost btn-sm" id="btnGiteeDisconnect" style="display: none;">断开连接</button>
+                        <button class="btn btn-secondary btn-sm" id="giteeAuthCancelBtn">取消</button>
+                        <button class="btn btn-primary btn-sm" id="giteeAuthSubmitBtn">🔑 验证并授权连接</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Gitee 提交记录 AI 汇总与任务工单生成弹窗 -->
+        <div class="modal-backdrop" id="giteeAiTaskModal" style="display: none;">
+            <div class="modal-dialog gitee-ai-task-dialog">
+                <div class="modal-header">
+                    <div>
+                        <h3 class="modal-title" style="display: flex; align-items: center; gap: 8px;">
+                            <span>✨ AI 汇总分析代码提交 & 生成任务工单</span>
+                        </h3>
+                        <p style="margin: 4px 0 0 0; font-size: 12px; color: #64748b;">
+                            根据选定时间范围内的 Commit 记录由 Agent 提炼归纳，并严格填充入《任务模板.xlsx》
+                        </p>
+                    </div>
+                    <button class="modal-close" id="giteeAiTaskModalCloseBtn">&times;</button>
+                </div>
+
+                <div class="modal-body gitee-ai-task-body">
+                    <!-- 条件配置面板 -->
+                    <div class="ai-task-config-card">
+                        <div class="ai-task-config-row">
+                            <!-- 时间范围筛选 -->
+                            <div class="ai-task-form-group date-range-group">
+                                <label class="ai-task-label">
+                                    <span>📅 提交时间范围:</span>
+                                    <span class="quick-preset-chips" id="giteeTaskQuickPresets">
+                                        <button type="button" class="preset-chip" data-preset="7d">近7天</button>
+                                        <button type="button" class="preset-chip active" data-preset="week">本周</button>
+                                        <button type="button" class="preset-chip" data-preset="14d">近14天</button>
+                                        <button type="button" class="preset-chip" data-preset="30d">近30天</button>
+                                        <button type="button" class="preset-chip" data-preset="all">全部</button>
+                                    </span>
+                                </label>
+                                <div class="date-inputs-wrapper">
+                                    <input type="date" id="giteeTaskStartDate" class="form-control date-input">
+                                    <span class="date-sep">至</span>
+                                    <input type="date" id="giteeTaskEndDate" class="form-control date-input">
+                                </div>
+                            </div>
+
+                            <!-- 仓库与项目配置 -->
+                            <div class="ai-task-form-group">
+                                <label class="ai-task-label">📦 筛选仓库:</label>
+                                <select id="giteeTaskRepoSelect" class="form-control">
+                                    <option value="all">全部仓库 (聚合分析)</option>
+                                </select>
+                            </div>
+
+                            <div class="ai-task-form-group">
+                                <label class="ai-task-label">🏢 所属项目名称:</label>
+                                <input type="text" id="giteeTaskProjectInput" class="form-control" value="智慧医疗便民服务平台项目" placeholder="对应模板的所属项目">
+                            </div>
+
+                            <div class="ai-task-form-group">
+                                <label class="ai-task-label">👤 任务指派给:</label>
+                                <input type="text" id="giteeTaskAssigneeInput" class="form-control" value="张开发(#dev_user)" placeholder="如: 张开发(#dev_user)">
+                            </div>
+                        </div>
+
+                        <!-- 匹配结果提示条与触发按钮 -->
+                        <div class="ai-task-config-action-row">
+                            <div class="ai-task-match-badge" id="giteeTaskMatchBadge">
+                                🔍 当前时间段内共匹配到 <strong id="giteeTaskMatchedCount">0</strong> 条代码提交记录
+                            </div>
+                            <button type="button" class="btn btn-ai" id="btnStartGiteeAiTaskGen">
+                                🚀 开始 AI 智能汇总与分析
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 加载状态中 -->
+                    <div id="giteeAiTaskLoadingBox" class="ai-task-loading-box" style="display: none;">
+                        <div class="tool-spinner" style="width: 32px; height: 32px; margin: 0 auto 12px auto;"></div>
+                        <div style="font-weight: 600; color: #4338ca; font-size: 15px;">AI Agent 正在分析提炼提交记录...</div>
+                        <div style="font-size: 12px; color: #64748b; margin-top: 6px;">
+                            基于代码提交历史归纳业务任务项，并严格对齐《任务模板.xlsx》结构与单元格样式
+                        </div>
+                    </div>
+
+                    <!-- 任务工单预览与编辑区 -->
+                    <div id="giteeAiTaskResultArea" class="ai-task-result-area" style="display: none;">
+                        <div class="ai-task-result-header">
+                            <div class="ai-task-result-summary">
+                                <span class="summary-pill">📅 <span id="giteeTaskResDateRange">-</span></span>
+                                <span class="summary-pill">📦 代码提交: <strong id="giteeTaskResCommitCount">0</strong> 次</span>
+                                <span class="summary-pill highlight">📋 提炼任务: <strong id="giteeTaskResTaskCount">0</strong> 项</span>
+                                <span class="summary-pill highlight">⏱️ 预计总工时: <strong id="giteeTaskResTotalHours">0</strong> h</span>
+                                <span class="summary-pill source-pill" id="giteeTaskResSourceTag">🤖 DeepSeek AI Agent</span>
+                            </div>
+                            <div class="ai-task-result-actions">
+                                <button type="button" class="btn btn-secondary btn-sm" id="btnAiTaskAddRow">
+                                    ➕ 添加任务项
+                                </button>
+                                <button type="button" class="btn btn-secondary btn-sm" id="btnAiTaskQuickDownload">
+                                    📥 导出 Excel
+                                </button>
+                                <button type="button" class="btn btn-success btn-sm" id="btnAiTaskImportToZentao">
+                                    🚀 直接导入到禅道任务
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="ai-task-table-wrapper">
+                            <table class="ai-task-preview-table" id="giteeAiTaskTable">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 36px; text-align: center;">#</th>
+                                        <th style="width: 140px;">所属项目</th>
+                                        <th style="width: 110px;">所属模块</th>
+                                        <th style="width: 110px;">指派给</th>
+                                        <th style="width: 210px;">任务名称 <span style="color:#ef4444;">*</span></th>
+                                        <th style="min-width: 260px;">任务描述</th>
+                                        <th style="width: 75px;">类型 <span style="color:#ef4444;">*</span></th>
+                                        <th style="width: 65px;">优先级</th>
+                                        <th style="width: 75px;">最初预计(h)</th>
+                                        <th style="width: 115px;">预计开始</th>
+                                        <th style="width: 115px;">截止日期</th>
+                                        <th style="width: 45px; text-align: center;">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="giteeAiTaskTableBody">
+                                    <!-- 由 JS 动态渲染各任务行 -->
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <div class="ai-task-template-notice">
+                            💡 提示：本任务表格严格套用 <code>任务模板.xlsx</code> 格式，支持在表格中直接微调修改。点击右下方【确认并下载 Excel 工单】即可直接下载对齐格式的 <code>.xlsx</code> 文件。
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="font-size: 12px; color: #64748b;" id="giteeTaskFooterStatus">
+                        支持将生成的任务一键直接创建到禅道系统中，或导出 Excel 离线存档
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-secondary btn-sm" id="giteeAiTaskModalCancelBtn">关闭</button>
+                        <button class="btn btn-secondary btn-sm" id="btnAiTaskConfirmDownload" style="display: none;">
+                            📥 下载 Excel 工单
+                        </button>
+                        <button class="btn btn-success btn-sm" id="btnAiTaskFooterImportToZentao" style="display: none;">
+                            🚀 直接导入到禅道任务
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+
 
         <!-- 加载与执行进度遮罩 -->
         <div class="loading-overlay" id="loadingOverlay" style="display: none;">
@@ -938,7 +1365,7 @@
 
             <!-- 底部输入区 -->
             <div class="chat-input-bar">
-                <textarea id="aiChatInput" class="chat-textarea" placeholder="和小禅聊聊，如：查一下武穴项目的任务... (Enter 发送)" rows="1"></textarea>
+                <textarea id="aiChatInput" class="chat-textarea" placeholder="和小禅聊聊，如：查一下平台项目的任务... (Enter 发送)" rows="1"></textarea>
                 <button type="button" class="btn-send-ai" id="btnSendAi" title="发送 (Enter)">
                     <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                         <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
@@ -948,6 +1375,6 @@
         </div>
     </div>
 
-    <script src="static/js/app.js?v=39"></script>
+    <script src="static/js/app.js?v=46"></script>
 </body>
 </html>

@@ -3104,6 +3104,1235 @@ input::-ms-clear {
     color: #dc2626;
 }
 
+/* =========================================================
+   Gitee 开放 API 代码提交看板样式 (Gitee Commits Module)
+   ========================================================= */
+
+.gitee-dashboard-card {
+    border-radius: var(--radius-lg);
+    background: #ffffff;
+    box-shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.06), 0 2px 6px -1px rgba(15, 23, 42, 0.04);
+}
+
+.gitee-main-header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 14px;
+    margin-bottom: 16px;
+}
+
+.gitee-cat-logo {
+    font-size: 24px;
+    line-height: 1;
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.1));
+}
+
+.gitee-mode-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    color: #166534;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.gitee-mode-badge.is-demo {
+    background: #fef3c7;
+    border-color: #fde68a;
+    color: #b45309;
+}
+
+.dot-pulse {
+    width: 7px;
+    height: 7px;
+    background-color: #22c55e;
+    border-radius: 50%;
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5);
+    animation: pulseGlow 1.8s infinite;
+}
+
+.gitee-mode-badge.is-demo .dot-pulse {
+    background-color: #f59e0b;
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.5);
+}
+
+@keyframes pulseGlow {
+    0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+    70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+    100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+}
+
+.gitee-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+/* 顶部信息卡片区布局 (Profile + 4 Metric Stat Cards) */
+.gitee-top-dashboard {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+@media (max-width: 1100px) {
+    .gitee-top-dashboard {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* 用户与企业画像卡片 */
+.gitee-profile-card {
+    background: linear-gradient(145deg, #f8fafc 0%, #f1f5f9 100%);
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    box-shadow: 0 2px 8px -2px rgba(0, 0, 0, 0.05);
+    position: relative;
+    overflow: hidden;
+}
+
+.gitee-profile-card::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, #2563eb 0%, #7c3aed 50%, #db2777 100%);
+}
+
+.gitee-profile-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.gitee-avatar-container {
+    position: relative;
+    width: 52px;
+    height: 52px;
+    flex-shrink: 0;
+}
+
+.gitee-user-avatar {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid #ffffff;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.gitee-avatar-fallback {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+    color: #ffffff;
+    font-size: 20px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px solid #ffffff;
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
+}
+
+.gitee-online-status {
+    position: absolute;
+    bottom: 2px;
+    right: 2px;
+    width: 12px;
+    height: 12px;
+    background: #10b981;
+    border: 2px solid #ffffff;
+    border-radius: 50%;
+}
+
+.gitee-profile-names {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    flex: 1;
+}
+
+.gitee-name-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.gitee-realname {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+    color: #0f172a;
+    line-height: 1.2;
+}
+
+.gitee-login-tag {
+    font-size: 11px;
+    background: #e2e8f0;
+    color: #475569;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-family: Consolas, monospace;
+}
+
+.gitee-enterprise-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: #1e3a8a;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ent-tag-badge {
+    background: #dbeafe;
+    color: #1d4ed8;
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-weight: 700;
+}
+
+.gitee-profile-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid #e2e8f0;
+    background: rgba(255, 255, 255, 0.7);
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+
+.profile-meta-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.profile-meta-item .meta-label {
+    font-size: 10px;
+    color: #64748b;
+    font-weight: 500;
+}
+
+.profile-meta-item .meta-value {
+    font-size: 11px;
+    color: #1e293b;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.code-font {
+    font-family: Consolas, 'Fira Code', monospace;
+}
+
+/* 4 统计指标卡片 Grid */
+.gitee-stat-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+}
+
+@media (max-width: 900px) {
+    .gitee-stat-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+.gitee-stat-card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+    transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+.gitee-stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px -4px rgba(0, 0, 0, 0.08);
+}
+
+.stat-card-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    flex-shrink: 0;
+}
+
+.card-repos .stat-card-icon {
+    background: #e0f2fe;
+    color: #0284c7;
+}
+
+.card-commits .stat-card-icon {
+    background: #f3e8ff;
+    color: #7c3aed;
+}
+
+.card-pushes .stat-card-icon {
+    background: #dcfce7;
+    color: #059669;
+}
+
+.card-branches .stat-card-icon {
+    background: #fef3c7;
+    color: #d97706;
+}
+
+.stat-card-content {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.stat-card-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #64748b;
+    margin-bottom: 2px;
+}
+
+.stat-card-value-wrap {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+}
+
+.stat-card-value {
+    font-size: 24px;
+    font-weight: 800;
+    color: #0f172a;
+    line-height: 1.1;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.card-repos:hover { border-color: #7dd3fc; }
+.card-commits:hover { border-color: #c084fc; }
+.card-pushes:hover { border-color: #86efac; }
+.card-branches:hover { border-color: #fde68a; }
+
+.stat-card-unit {
+    font-size: 11px;
+    color: #94a3b8;
+    font-weight: 500;
+}
+
+.stat-card-sub {
+    font-size: 11px;
+    color: #94a3b8;
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* 项目筛选栏 (Tag Pills + Search Controls) */
+.gitee-filter-card {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.gitee-filter-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.filter-section-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #334155;
+    white-space: nowrap;
+}
+
+.gitee-repo-tags-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    flex: 1;
+}
+
+.gitee-repo-tags-list {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.gitee-repo-tag-pill {
+    padding: 4px 10px;
+    border-radius: 20px;
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    color: #475569;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    user-select: none;
+}
+
+.gitee-repo-tag-pill:hover {
+    background: #eff6ff;
+    border-color: #93c5fd;
+    color: #1d4ed8;
+}
+
+.gitee-repo-tag-pill.active {
+    background: #2563eb;
+    border-color: #2563eb;
+    color: #ffffff;
+    font-weight: 600;
+    box-shadow: 0 2px 6px rgba(37, 99, 235, 0.25);
+}
+
+.gitee-repo-tag-pill .pill-count {
+    background: rgba(0, 0, 0, 0.08);
+    padding: 0 6px;
+    border-radius: 10px;
+    font-size: 11px;
+}
+
+.gitee-repo-tag-pill.active .pill-count {
+    background: rgba(255, 255, 255, 0.25);
+    color: #ffffff;
+}
+
+/* 检索输入与筛选器 */
+.gitee-search-controls-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.gitee-search-box {
+    position: relative;
+    flex: 1;
+    min-width: 260px;
+}
+
+.gitee-search-box .search-icon {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 13px;
+    color: #94a3b8;
+    pointer-events: none;
+}
+
+.gitee-search-input {
+    padding-left: 32px !important;
+    padding-right: 32px !important;
+    font-size: 13px;
+    height: 36px;
+    background: #ffffff;
+}
+
+.gitee-search-clear {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    color: #94a3b8;
+    cursor: pointer;
+    font-size: 16px;
+    padding: 2px 6px;
+    border-radius: 50%;
+}
+
+.gitee-search-clear:hover {
+    color: #ef4444;
+}
+
+.gitee-extra-filters {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.select-type-filter,
+.select-branch-filter {
+    height: 36px;
+    font-size: 12px;
+    padding: 0 10px;
+    background: #ffffff;
+    max-width: 170px;
+    cursor: pointer;
+}
+
+.gitee-result-counter {
+    font-size: 12px;
+    color: #64748b;
+    white-space: nowrap;
+    margin-left: auto;
+}
+
+.gitee-result-counter b {
+    color: #2563eb;
+    font-size: 13px;
+}
+
+/* 提交流水列表容器 */
+.gitee-commits-container {
+    min-height: 280px;
+    display: flex;
+    flex-direction: column;
+}
+
+.gitee-state-notice {
+    padding: 48px 16px;
+    text-align: center;
+    color: #64748b;
+    font-size: 13px;
+}
+
+.gitee-commits-stream {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+/* 单条 Commit 流水卡片 */
+.gitee-commit-item {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 12px 16px;
+    transition: all 0.15s ease;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+}
+
+.gitee-commit-item:hover {
+    border-color: #cbd5e1;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+}
+
+.commit-item-main {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.commit-meta-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 12px;
+}
+
+/* 仓库标识 Badge */
+.commit-repo-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    background: #f1f5f9;
+    color: #334155;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    font-weight: 600;
+    font-size: 11px;
+}
+
+/* 分支名称 Badge */
+.commit-branch-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 7px;
+    background: #eff6ff;
+    color: #1d4ed8;
+    border: 1px solid #bfdbfe;
+    border-radius: 12px;
+    font-size: 11px;
+    font-family: Consolas, monospace;
+}
+
+/* 提交类型标签样式 (STYLE / FIX / FEAT 等) */
+.commit-type-tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 7px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+}
+
+.commit-type-tag.tag-feat {
+    background: #dcfce7;
+    color: #15803d;
+    border: 1px solid #86efac;
+}
+
+.commit-type-tag.tag-fix {
+    background: #fee2e2;
+    color: #b91c1c;
+    border: 1px solid #fca5a5;
+}
+
+.commit-type-tag.tag-style {
+    background: #f3e8ff;
+    color: #7e22ce;
+    border: 1px solid #d8b4fe;
+}
+
+.commit-type-tag.tag-refactor {
+    background: #fef3c7;
+    color: #b45309;
+    border: 1px solid #fde68a;
+}
+
+.commit-type-tag.tag-perf {
+    background: #ccfbf1;
+    color: #0f766e;
+    border: 1px solid #99f6e4;
+}
+
+.commit-type-tag.tag-docs {
+    background: #e0f2fe;
+    color: #0369a1;
+    border: 1px solid #7dd3fc;
+}
+
+.commit-type-tag.tag-test {
+    background: #fce7f3;
+    color: #be185d;
+    border: 1px solid #fbcfe8;
+}
+
+.commit-type-tag.tag-chore {
+    background: #f1f5f9;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+}
+
+.commit-type-tag.tag-merge {
+    background: #e0e7ff;
+    color: #4338ca;
+    border: 1px solid #c7d2fe;
+}
+
+.commit-type-tag.tag-other {
+    background: #f8fafc;
+    color: #64748b;
+    border: 1px solid #e2e8f0;
+}
+
+.commit-rel-time {
+    color: #64748b;
+    font-weight: 500;
+}
+
+.commit-abs-time {
+    color: #94a3b8;
+    font-size: 11px;
+}
+
+.commit-hash-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    font-family: Consolas, monospace;
+    font-size: 11px;
+    color: #475569;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.commit-hash-btn:hover {
+    background: #e2e8f0;
+    color: #0f172a;
+}
+
+.commit-ext-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    color: #2563eb;
+    text-decoration: none;
+    font-size: 11px;
+    margin-left: auto;
+    font-weight: 500;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: background-color 0.15s ease;
+}
+
+.commit-ext-link:hover {
+    background: #eff6ff;
+    text-decoration: underline;
+}
+
+.commit-toggle-btn {
+    background: none;
+    border: none;
+    color: #64748b;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.commit-toggle-btn:hover {
+    background: #f1f5f9;
+    color: #1e293b;
+}
+
+/* 提交备注标题 */
+.commit-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: #1e293b;
+    line-height: 1.45;
+    word-break: break-word;
+}
+
+/* 折叠展开详情区 */
+.commit-expand-detail {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px dashed #e2e8f0;
+    background: #f8fafc;
+    border-radius: 6px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 12px;
+}
+
+.detail-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.detail-label {
+    color: #64748b;
+    font-weight: 600;
+    min-width: 72px;
+}
+
+.detail-value {
+    color: #1e293b;
+    word-break: break-all;
+}
+
+.detail-body-pre {
+    margin: 4px 0 0 0;
+    padding: 8px 10px;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    font-family: Consolas, 'Fira Code', Monaco, monospace;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: #334155;
+    white-space: pre-wrap;
+    max-height: 120px;
+    overflow-y: auto;
+}
+
+/* 分页控制栏样式 */
+.gitee-pagination-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid #e2e8f0;
+}
+
+.pagination-info {
+    font-size: 12px;
+    color: #64748b;
+}
+
+.pagination-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.pagination-size-select {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #64748b;
+}
+
+.pagination-size-select select {
+    font-size: 12px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid #cbd5e1;
+    background: #ffffff;
+}
+
+.pagination-buttons {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.page-btn {
+    min-width: 28px;
+    height: 28px;
+    padding: 0 6px;
+    font-size: 12px;
+    font-weight: 500;
+    border-radius: 4px;
+    border: 1px solid #cbd5e1;
+    background: #ffffff;
+    color: #334155;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+}
+
+.page-btn:hover:not(:disabled) {
+    background: #eff6ff;
+    border-color: #93c5fd;
+    color: #1d4ed8;
+}
+
+.page-btn.active {
+    background: #2563eb;
+    border-color: #2563eb;
+    color: #ffffff;
+    font-weight: 700;
+}
+
+.page-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* 报文查看器选项卡 */
+.gitee-payload-tabs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.payload-tab-btn {
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    border: 1px solid #cbd5e1;
+    background: #ffffff;
+    color: #475569;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.payload-tab-btn:hover {
+    background: #f1f5f9;
+}
+
+.payload-tab-btn.active {
+    background: #2563eb;
+    border-color: #2563eb;
+    color: #ffffff;
+    font-weight: 600;
+}
+
+/* =========================================================================
+   Gitee 提交 AI 汇总与任务工单生成样式
+   ========================================================================= */
+.btn-ai {
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
+    color: #ffffff;
+    border: none;
+    font-weight: 600;
+    box-shadow: 0 2px 6px rgba(139, 92, 246, 0.28);
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.btn-ai:hover {
+    background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #c026d3 100%);
+    box-shadow: 0 4px 12px rgba(139, 92, 246, 0.42);
+    color: #ffffff;
+    transform: translateY(-1px);
+}
+
+.gitee-ai-task-dialog {
+    max-width: 95vw;
+    width: 1220px;
+}
+
+.gitee-ai-task-body {
+    padding: 20px;
+    background: #f8fafc;
+    max-height: 80vh;
+    overflow-y: auto;
+}
+
+.ai-task-config-card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: var(--radius-lg);
+    padding: 16px 20px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    margin-bottom: 16px;
+}
+
+.ai-task-config-row {
+    display: grid;
+    grid-template-columns: 2.2fr 1.2fr 1.5fr 1.2fr;
+    gap: 16px;
+    align-items: flex-end;
+}
+
+@media (max-width: 992px) {
+    .ai-task-config-row {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+@media (max-width: 640px) {
+    .ai-task-config-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+.ai-task-form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ai-task-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #334155;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.quick-preset-chips {
+    display: inline-flex;
+    gap: 4px;
+}
+
+.preset-chip {
+    padding: 2px 6px;
+    font-size: 11px;
+    border-radius: 4px;
+    border: 1px solid #cbd5e1;
+    background: #f8fafc;
+    color: #64748b;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.preset-chip:hover {
+    background: #e2e8f0;
+    color: #1e293b;
+}
+
+.preset-chip.active {
+    background: #eff6ff;
+    border-color: #3b82f6;
+    color: #1d4ed8;
+    font-weight: 600;
+}
+
+.date-inputs-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.date-inputs-wrapper .date-input {
+    flex: 1;
+    font-size: 12px;
+    padding: 6px 8px;
+}
+
+.date-sep {
+    font-size: 12px;
+    color: #94a3b8;
+}
+
+.ai-task-config-action-row {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px dashed #e2e8f0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.ai-task-match-badge {
+    font-size: 13px;
+    color: #475569;
+    background: #f1f5f9;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid #e2e8f0;
+}
+
+.ai-task-match-badge strong {
+    color: #2563eb;
+    font-size: 14px;
+}
+
+.ai-task-loading-box {
+    background: #ffffff;
+    border: 1px solid #c7d2fe;
+    border-radius: var(--radius-lg);
+    padding: 36px 20px;
+    text-align: center;
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.08);
+    margin-bottom: 16px;
+}
+
+.ai-task-result-area {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: var(--radius-lg);
+    padding: 16px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+}
+
+.ai-task-result-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.ai-task-result-summary {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.summary-pill {
+    font-size: 12px;
+    background: #f1f5f9;
+    color: #475569;
+    padding: 4px 10px;
+    border-radius: 20px;
+    border: 1px solid #e2e8f0;
+}
+
+.summary-pill.highlight {
+    background: #eff6ff;
+    color: #1e40af;
+    border-color: #bfdbfe;
+}
+
+.summary-pill.highlight strong {
+    color: #2563eb;
+}
+
+.summary-pill.source-pill {
+    background: #f5f3ff;
+    color: #6d28d9;
+    border-color: #ddd6fe;
+    font-weight: 500;
+}
+
+.ai-task-result-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.ai-task-table-wrapper {
+    overflow-x: auto;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    max-height: 52vh;
+}
+
+.ai-task-preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    background: #ffffff;
+}
+
+.ai-task-preview-table thead th {
+    position: sticky;
+    top: 0;
+    background: #f8fafc;
+    color: #334155;
+    font-weight: 600;
+    padding: 8px 10px;
+    text-align: left;
+    border-bottom: 2px solid #cbd5e1;
+    border-right: 1px solid #e2e8f0;
+    white-space: nowrap;
+    z-index: 10;
+}
+
+.ai-task-preview-table tbody td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #e2e8f0;
+    border-right: 1px solid #f1f5f9;
+    vertical-align: middle;
+}
+
+.ai-task-preview-table tbody tr:hover {
+    background: #f8fafc;
+}
+
+.task-cell-input,
+.task-cell-select {
+    width: 100%;
+    border: 1px solid transparent;
+    background: transparent;
+    padding: 4px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+    color: #1e293b;
+    box-sizing: border-box;
+    transition: all 0.15s ease;
+}
+
+.task-cell-input:hover,
+.task-cell-select:hover {
+    border-color: #cbd5e1;
+    background: #ffffff;
+}
+
+.task-cell-input:focus,
+.task-cell-select:focus {
+    outline: none;
+    border-color: #3b82f6;
+    background: #ffffff;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.task-cell-textarea {
+    width: 100%;
+    border: 1px solid transparent;
+    background: transparent;
+    padding: 4px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    color: #1e293b;
+    resize: vertical;
+    box-sizing: border-box;
+    font-family: inherit;
+    line-height: 1.4;
+    transition: all 0.15s ease;
+}
+
+.task-cell-textarea:hover {
+    border-color: #cbd5e1;
+    background: #ffffff;
+}
+
+.task-cell-textarea:focus {
+    outline: none;
+    border-color: #3b82f6;
+    background: #ffffff;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.btn-task-row-del {
+    background: transparent;
+    border: none;
+    color: #ef4444;
+    cursor: pointer;
+    padding: 4px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+    transition: all 0.15s;
+}
+
+.btn-task-row-del:hover {
+    background: #fee2e2;
+}
+
+.ai-task-template-notice {
+    margin-top: 10px;
+    font-size: 12px;
+    color: #64748b;
+    background: #f8fafc;
+    border-left: 3px solid #6366f1;
+    padding: 8px 12px;
+    border-radius: 0 4px 4px 0;
+}
+
+
+
 
 
 

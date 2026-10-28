@@ -20,6 +20,15 @@ from zentao_client import ZentaoClient
 from weekly_report import generate_weekly_report_data, export_weekly_report_excel
 from ai_agent import chat_with_deepseek_agent, DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_DEEPSEEK_MODEL
 from ai_document import DOCS_DIR, markdown_to_docx, sanitize_filename
+from gitee_client import GiteeClient, get_demo_gitee_dataset
+from gitee_task_generator import (
+    filter_commits_by_time_range,
+    generate_tasks_with_agent,
+    heuristic_cluster_commits_to_tasks,
+    fill_task_template_excel,
+    DOCS_DIR as GITEE_DOCS_DIR,
+    TEMPLATE_PATH as GITEE_TASK_TEMPLATE_PATH
+)
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = os.environ.get('SECRET_KEY', 'zentao-studio-multiuser-isolated-secret-2026')
@@ -29,7 +38,7 @@ app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.jinja_env.auto_reload = True
 
 # 默认禅道系统访问地址 (仅作为输入框默认提示地址，不存储任何默认账号)
-DEFAULT_ZENTAO_URL = os.environ.get('ZENTAO_URL', 'https://bkgtsoft.chandao.com')
+DEFAULT_ZENTAO_URL = os.environ.get('ZENTAO_URL', 'https://demo.zentao.net')
 
 # 多用户独立客户端连接池：{ session_id: { 'client': ZentaoClient实例, 'last_seen': timestamp, 'account': str } }
 _clients_pool = {}
@@ -938,7 +947,7 @@ def load_user_groups():
             "id": "grp_default_app",
             "name": "应用组",
             "members": [
-                {"account": "wanglinmiao", "realname": "王淋淼"}
+                {"account": "dev_user", "realname": "张开发"}
             ]
         }
     ]
@@ -994,6 +1003,607 @@ def api_delete_group(group_id):
     new_groups = [g for g in groups if g.get('id') != group_id]
     save_user_groups(new_groups)
     return jsonify({"success": True, "message": "分组已删除", "groups": new_groups})
+
+
+# ==========================================
+# Gitee 开放 API 提交记录模块 (Gitee Commits Module)
+# ==========================================
+GITEE_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gitee_config.json")
+_gitee_clients = {}  # sid -> GiteeClient
+_gitee_clients_lock = threading.Lock()
+
+def get_saved_gitee_creds(sid: str = None) -> dict:
+    """获取已持久化的 Gitee 授权凭据"""
+    creds = session.get('gitee_creds')
+    if creds and isinstance(creds, dict) and creds.get('token'):
+        return creds
+    if os.path.exists(GITEE_CONFIG_FILE):
+        try:
+            with open(GITEE_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                all_cfg = json.load(f)
+                if sid and sid in all_cfg:
+                    return all_cfg[sid]
+                return all_cfg.get('default') or {}
+        except Exception:
+            pass
+    return {}
+
+def save_persistent_gitee_creds(sid: str, creds: dict):
+    """持久化保存 Gitee 凭据"""
+    all_cfg = {}
+    if os.path.exists(GITEE_CONFIG_FILE):
+        try:
+            with open(GITEE_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                all_cfg = json.load(f)
+        except Exception:
+            all_cfg = {}
+    if sid:
+        all_cfg[sid] = creds
+    all_cfg['default'] = creds
+    try:
+        with open(GITEE_CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(all_cfg, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        app.logger.error(f"Failed to save gitee_config.json: {e}")
+
+def get_or_create_gitee_client(token: str = None, enterprise: str = None) -> tuple:
+    """获取当前会话专属的 GiteeClient 实例"""
+    sid = get_session_id()
+    saved = get_saved_gitee_creds(sid)
+    actual_token = token or (saved.get('token') if saved else None)
+    actual_ent = enterprise if enterprise is not None else (saved.get('enterprise') if saved else None)
+
+    if not actual_token:
+        return None, "尚未配置 Gitee Access Token"
+
+    with _gitee_clients_lock:
+        if sid in _gitee_clients and _gitee_clients[sid].access_token == actual_token:
+            client = _gitee_clients[sid]
+            if actual_ent:
+                client.enterprise = actual_ent
+            return client, None
+        client = GiteeClient(access_token=actual_token, enterprise=actual_ent)
+        _gitee_clients[sid] = client
+        return client, None
+
+@app.route('/api/gitee/status', methods=['GET'])
+def api_gitee_status():
+    """获取当前用户 Gitee 授权状态与基本配置"""
+    sid = get_session_id()
+    saved = get_saved_gitee_creds(sid)
+    zt_client, _ = get_client()
+    default_user = zt_client.account if zt_client else 'dev_user'
+    default_name = zt_client.realname if zt_client else '张开发'
+
+    if not saved or (not saved.get('token') and not saved.get('use_demo')):
+        return jsonify({
+            "code": 200,
+            "success": True,
+            "authenticated": False,
+            "configured": False,
+            "is_demo": False,
+            "default_user": default_user,
+            "default_name": default_name
+        })
+
+    if saved.get('use_demo'):
+        demo = get_demo_gitee_dataset(username=default_user, realname=default_name)
+        return jsonify({
+            "code": 200,
+            "success": True,
+            "authenticated": True,
+            "configured": False,
+            "is_demo": True,
+            "user": demo.get('user'),
+            "enterprise": demo.get('enterprise'),
+            "enterprises": demo.get('enterprises', [])
+        })
+
+    client, err = get_or_create_gitee_client()
+    if err or not client:
+        return jsonify({"code": 200, "success": True, "authenticated": False, "configured": False, "error": err})
+
+    ok_u, user_info, err_u = client.get_user_info()
+    if not ok_u:
+        return jsonify({"code": 200, "success": True, "authenticated": False, "configured": False, "error": f"Token 鉴权失败: {err_u}"})
+
+    ok_e, enterprises, _ = client.get_user_enterprises()
+    active_ent = None
+    if client.enterprise and enterprises:
+        for e in enterprises:
+            if str(e.get('path', '')).lower() == client.enterprise.lower():
+                active_ent = e
+                break
+    if not active_ent and enterprises:
+        active_ent = enterprises[0]
+
+    return jsonify({
+        "code": 200,
+        "success": True,
+        "authenticated": True,
+        "configured": True,
+        "is_demo": False,
+        "user": user_info,
+        "enterprise": active_ent,
+        "enterprises": enterprises or []
+    })
+
+@app.route('/api/gitee/auth', methods=['POST'])
+def api_gitee_auth():
+    """保存并验证 Gitee Access Token 授权信息或进入演示模式"""
+    data = request.get_json() or {}
+    use_demo = bool(data.get('use_demo'))
+    sid = get_session_id()
+
+    if use_demo:
+        demo_creds = {"use_demo": True}
+        session['gitee_creds'] = demo_creds
+        save_persistent_gitee_creds(sid, demo_creds)
+        demo_data = get_demo_gitee_dataset()
+        return jsonify({
+            "code": 200,
+            "success": True,
+            "message": "已切换至演示数据模式",
+            "is_demo": True,
+            "user": demo_data.get('user'),
+            "enterprise": demo_data.get('enterprise'),
+            "enterprises": demo_data.get('enterprises', [])
+        })
+
+    token = (data.get('token') or data.get('access_token') or '').strip()
+    enterprise = (data.get('enterprise') or '').strip()
+
+    if not token:
+        return jsonify({"code": 400, "success": False, "message": "Gitee Access Token 不能为空"}), 400
+
+    test_client = GiteeClient(access_token=token, enterprise=enterprise)
+    ok_u, user_info, err_u = test_client.get_user_info()
+    if not ok_u:
+        return jsonify({"code": 400, "success": False, "message": f"Gitee 授权验证失败: {err_u}"}), 400
+
+    ok_e, enterprises, _ = test_client.get_user_enterprises()
+    active_ent = None
+    if enterprise and enterprises:
+        for e in enterprises:
+            if str(e.get('path', '')).lower() == enterprise.lower():
+                active_ent = e
+                break
+    if not active_ent and enterprises:
+        active_ent = enterprises[0]
+
+    creds = {
+        "token": token,
+        "enterprise": active_ent.get('path') if active_ent else enterprise,
+        "user_login": user_info.get('login'),
+        "user_name": user_info.get('name'),
+        "use_demo": False
+    }
+    session['gitee_creds'] = creds
+    save_persistent_gitee_creds(sid, creds)
+
+    with _gitee_clients_lock:
+        _gitee_clients[sid] = test_client
+
+    return jsonify({
+        "code": 200,
+        "success": True,
+        "message": "Gitee 授权连接成功",
+        "user": user_info,
+        "enterprise": active_ent,
+        "enterprises": enterprises or []
+    })
+
+@app.route('/api/gitee/logout', methods=['POST'])
+def api_gitee_logout():
+    """清除当前 Gitee 授权连接"""
+    sid = get_session_id()
+    session.pop('gitee_creds', None)
+    with _gitee_clients_lock:
+        _gitee_clients.pop(sid, None)
+    all_cfg = {}
+    if os.path.exists(GITEE_CONFIG_FILE):
+        try:
+            with open(GITEE_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                all_cfg = json.load(f)
+            all_cfg.pop(sid, None)
+            all_cfg.pop('default', None)
+            with open(GITEE_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(all_cfg, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    return jsonify({"code": 200, "success": True, "message": "已成功断开 Gitee 授权连接"})
+
+@app.route('/api/gitee/commits', methods=['GET'])
+def api_gitee_commits():
+    """
+    拉取当前登录用户在企业下的代码提交记录数据。
+    支持参数：
+    - enterprise: 指定企业标识 (可选)
+    - refresh: 1 表示强制刷新实时请求
+    - use_demo: 1 表示加载高拟真演示数据集
+    """
+    sid = get_session_id()
+    use_demo = request.args.get('use_demo', '0') == '1'
+    enterprise_param = request.args.get('enterprise', '').strip()
+
+    zt_client, _ = get_client()
+    default_user = zt_client.account if zt_client else 'dev_user'
+    default_name = zt_client.realname if zt_client else '张开发'
+
+    saved_creds = get_saved_gitee_creds(sid)
+    is_demo_saved = bool(saved_creds and saved_creds.get('use_demo'))
+
+    if use_demo or is_demo_saved or not saved_creds or not saved_creds.get('token'):
+        demo_data = get_demo_gitee_dataset(username=default_user, realname=default_name)
+        stats = demo_data.get('stats', {})
+        branches = list({c.get('branch') for c in demo_data.get('commits', []) if c.get('branch')})
+        return jsonify({
+            "code": 200,
+            "success": True,
+            "authenticated": True,
+            "is_demo": True,
+            "user": demo_data.get('user'),
+            "enterprise": demo_data.get('enterprise'),
+            "enterprise_member_id": stats.get('member_id', '982143'),
+            "stats": stats,
+            "repos": demo_data.get('repos', []),
+            "commits": demo_data.get('commits', []),
+            "branches": branches,
+            "raw_api_payload": demo_data.get('raw_api_payload', []),
+            "data": demo_data
+        })
+
+    client, err = get_or_create_gitee_client(enterprise=enterprise_param or None)
+    if err or not client:
+        return jsonify({"code": 400, "success": False, "authenticated": False, "message": err or "Gitee 客户端未初始化"}), 400
+
+    target_ent = enterprise_param or client.enterprise or None
+    extra_names = [default_user, default_name, 'dev_user']
+    extra_emails = [f"{default_user}@example.com"] if default_user else []
+    ok, result_data, err_msg = client.fetch_user_commit_events(
+        target_enterprise_path=target_ent,
+        extra_names=extra_names,
+        extra_emails=extra_emails
+    )
+    if not ok:
+        return jsonify({
+            "code": 500,
+            "success": False,
+            "authenticated": True,
+            "message": f"拉取 Gitee 提交数据失败: {err_msg}",
+            "raw_api_payload": client.get_raw_logs()
+        }), 500
+
+    branches = list({c.get('branch') for c in result_data.get('commits', []) if c.get('branch')})
+
+    return jsonify({
+        "code": 200,
+        "success": True,
+        "authenticated": True,
+        "is_demo": False,
+        "user": result_data.get('user'),
+        "enterprise": result_data.get('enterprise'),
+        "enterprise_member_id": result_data.get('stats', {}).get('member_id'),
+        "stats": result_data.get('stats'),
+        "repos": result_data.get('repos', []),
+        "commits": result_data.get('commits', []),
+        "branches": branches,
+        "raw_api_payload": result_data.get('raw_api_payload', []),
+        "data": result_data
+    })
+
+@app.route('/api/gitee/raw_payload', methods=['GET'])
+def api_gitee_raw_payload():
+    """获取 Gitee 接口交互的完整原始报文 (供【接口 API 报文】查看器使用)"""
+    sid = get_session_id()
+    client, _ = get_or_create_gitee_client()
+    if client:
+        logs = client.get_raw_logs()
+        if logs:
+            return jsonify({
+                "code": 200,
+                "success": True,
+                "is_demo": False,
+                "total_records": len(logs),
+                "history": logs,
+                "logs": logs
+            })
+
+    demo = get_demo_gitee_dataset()
+    demo_logs = demo.get("raw_api_payload", [])
+    return jsonify({
+        "code": 200,
+        "success": True,
+        "is_demo": True,
+        "total_records": len(demo_logs),
+        "history": demo_logs,
+        "logs": demo_logs
+    })
+
+
+@app.route('/api/gitee/ai_tasks/generate', methods=['POST'])
+def api_gitee_ai_tasks_generate():
+    """
+    根据选定时间范围与仓库的 Gitee 提交记录，调度 Agent 进行汇总分析，并生成任务工单。
+    """
+    data = request.get_json() or {}
+    start_date = (data.get('start_date') or '').strip()
+    end_date = (data.get('end_date') or '').strip()
+    repo = (data.get('repo') or 'all').strip()
+    project_name = (data.get('project_name') or '智慧医疗便民服务平台项目').strip()
+    assigned_to = (data.get('assigned_to') or '张开发(#dev_user)').strip()
+    api_key = (data.get('api_key') or session.get('deepseek_api_key') or os.environ.get('DEEPSEEK_API_KEY') or '').strip()
+    base_url = (data.get('base_url') or DEFAULT_DEEPSEEK_BASE_URL).strip()
+    model = (data.get('model') or DEFAULT_DEEPSEEK_MODEL).strip()
+
+    # 获取 commits 列表（前端可直接传入已加载的 commits，提升响应速度）
+    commits = data.get('commits')
+    if commits is None:
+        sid = get_session_id()
+        is_demo = is_gitee_demo_mode(sid)
+        if is_demo:
+            demo_data = get_demo_gitee_dataset()
+            commits = demo_data.get('commits', [])
+        else:
+            client, _ = get_or_create_gitee_client()
+            if client:
+                ok, res, _ = client.fetch_user_commit_events(extra_names=[default_user, default_name, 'dev_user'])
+                commits = res.get('commits', []) if ok else []
+            else:
+                commits = []
+
+    # 1. 根据时间范围与仓库过滤
+    filtered_commits = filter_commits_by_time_range(commits, start_date=start_date or None, end_date=end_date or None, repo=repo)
+    if not filtered_commits:
+        return jsonify({
+            "code": 200,
+            "success": True,
+            "message": "在选定的时间范围内未查询到匹配的代码提交记录",
+            "commits_count": 0,
+            "date_range": f"{start_date or '不限'} ~ {end_date or '不限'}",
+            "tasks": []
+        })
+
+    # 2. 调用 Agent 进行归纳提炼
+    result = generate_tasks_with_agent(
+        commits=filtered_commits,
+        start_date=start_date,
+        end_date=end_date,
+        project_name=project_name,
+        assigned_to=assigned_to,
+        api_key=api_key,
+        base_url=base_url,
+        model=model
+    )
+
+    tasks = result.get('tasks', [])
+
+    # 3. 按照《任务模板.xlsx》填充生成 Excel
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    clean_date_tag = f"{start_date.replace('-', '')}_{end_date.replace('-', '')}" if start_date and end_date else timestamp
+    export_filename = f"Gitee代码提交汇总_禅道任务清单_{clean_date_tag}.xlsx"
+    export_filepath = os.path.join(GITEE_DOCS_DIR, export_filename)
+
+    try:
+        fill_task_template_excel(tasks, template_path=GITEE_TASK_TEMPLATE_PATH, output_path=export_filepath)
+        download_url = f"/api/gitee/ai_tasks/download/{export_filename}"
+    except Exception as e:
+        download_url = None
+        export_filename = None
+
+    return jsonify({
+        "code": 200,
+        "success": True,
+        "message": result.get("message", "任务提炼分析完成"),
+        "source": result.get("source"),
+        "date_range": f"{start_date or '未限定'} ~ {end_date or '未限定'}",
+        "commits_count": len(filtered_commits),
+        "tasks_count": len(tasks),
+        "total_estimate": sum(t.get("estimate", 0) for t in tasks),
+        "tasks": tasks,
+        "download_url": download_url,
+        "download_filename": export_filename
+    })
+
+
+@app.route('/api/gitee/ai_tasks/export', methods=['POST'])
+def api_gitee_ai_tasks_export():
+    """
+    接收用户在前端预览或编辑后的任务列表，严格填充入《任务模板.xlsx》并生成下载文件
+    """
+    data = request.get_json() or {}
+    tasks = data.get('tasks', [])
+    if not tasks:
+        return jsonify({"code": 400, "success": False, "message": "任务列表为空，无法导出"}), 400
+
+    filename = (data.get('filename') or '').strip()
+    if not filename:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"Gitee代码提交汇总_禅道任务清单_{timestamp}.xlsx"
+    elif not filename.endswith('.xlsx'):
+        filename += '.xlsx'
+
+    safe_filename = os.path.basename(filename)
+    export_filepath = os.path.join(GITEE_DOCS_DIR, safe_filename)
+
+    try:
+        fill_task_template_excel(tasks, template_path=GITEE_TASK_TEMPLATE_PATH, output_path=export_filepath)
+        return jsonify({
+            "code": 200,
+            "success": True,
+            "message": "已成功生成任务工单 Excel 文件",
+            "download_filename": safe_filename,
+            "download_url": f"/api/gitee/ai_tasks/download/{safe_filename}"
+        })
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "success": False,
+            "message": f"填充任务模板 Excel 失败: {str(e)}"
+        }), 500
+
+
+@app.route('/api/gitee/ai_tasks/download/<filename>', methods=['GET'])
+def api_gitee_ai_tasks_download(filename):
+    """
+    安全流式下载由 AI 汇总生成的任务模板 Excel 文件
+    """
+    safe_filename = os.path.basename(filename)
+    filepath = os.path.join(GITEE_DOCS_DIR, safe_filename)
+    if not os.path.exists(filepath):
+        return jsonify({"code": 404, "success": False, "message": "请求的任务 Excel 文件不存在或已被清理"}), 404
+
+    encoded_name = urllib.parse.quote(safe_filename.encode('utf-8'))
+    response = send_from_directory(
+        GITEE_DOCS_DIR,
+        safe_filename,
+        as_attachment=True,
+        download_name=safe_filename
+    )
+    response.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{encoded_name}"
+    return response
+
+
+@app.route('/api/gitee/ai_tasks/import_to_zentao', methods=['POST'])
+def api_gitee_ai_tasks_import_to_zentao():
+    """
+    将 AI 提炼或用户微调后的任务列表，直接一键批量创建/导入到禅道系统中
+    """
+    client, err = get_client()
+    if err or not client:
+        return jsonify({
+            "code": 401,
+            "success": False,
+            "message": "尚未登录禅道账号，请先在顶部登录禅道后再执行直接导入"
+        }), 401
+
+    data = request.get_json() or {}
+    tasks = data.get('tasks', [])
+    if not tasks:
+        return jsonify({"code": 400, "success": False, "message": "待导入的任务列表为空"}), 400
+
+    target_project_id = str(data.get('project_id') or '').strip()
+    target_project_name = str(data.get('project_name') or '').strip()
+
+    all_projs = []
+    all_projs_map = {}
+    try:
+        all_projs = client.get_all_projects() or []
+        for p in all_projs:
+            p_name = p.get('name')
+            p_id = p.get('id')
+            if p_name and p_id:
+                all_projs_map[p_name] = str(p_id)
+    except Exception:
+        pass
+
+    # 如果未直接传入 project_id，则按名称尝试从当前所有项目中匹配
+    if not target_project_id:
+        if target_project_name and target_project_name in all_projs_map:
+            target_project_id = all_projs_map[target_project_name]
+        elif target_project_name:
+            for p in all_projs:
+                if target_project_name in p.get('name', ''):
+                    target_project_id = str(p.get('id'))
+                    target_project_name = p.get('name')
+                    break
+        if not target_project_id and all_projs:
+            for p in all_projs:
+                if '便民' in p.get('name', '') or '平台' in p.get('name', ''):
+                    target_project_id = str(p.get('id'))
+                    target_project_name = p.get('name')
+                    break
+            if not target_project_id:
+                target_project_id = str(all_projs[0].get('id'))
+                target_project_name = all_projs[0].get('name')
+
+    if not target_project_id:
+        target_project_id = "178"
+
+    results = []
+    success_count = 0
+    failed_count = 0
+
+    for idx, t in enumerate(tasks):
+        name = (t.get('name') or '').strip()
+        if not name:
+            continue
+        desc = t.get('desc') or ''
+        task_type = t.get('type') or '开发'
+        pri = t.get('pri') or 3
+        estimate = t.get('estimate') or 2
+        assigned_to = t.get('assigned_to') or client.account
+        est_started = t.get('est_started') or ''
+        deadline = t.get('deadline') or ''
+
+        # 支持单条任务指定项目（如用户在表格内修改了所属项目）
+        task_proj_id = target_project_id
+        row_proj = str(t.get('project') or '').strip()
+        if row_proj:
+            if row_proj.isdigit():
+                task_proj_id = row_proj
+            elif row_proj in all_projs_map:
+                task_proj_id = all_projs_map[row_proj]
+
+        ok, msg, info = client.create_task(
+            project_id=task_proj_id,
+            name=name,
+            desc=desc,
+            task_type=task_type,
+            pri=pri,
+            estimate=estimate,
+            assigned_to=assigned_to,
+            est_started=est_started,
+            deadline=deadline
+        )
+
+        if ok:
+            success_count += 1
+            created_tid = info.get('id') if isinstance(info, dict) else None
+            results.append({
+                "index": idx,
+                "id": created_tid,
+                "name": name,
+                "project_id": task_proj_id,
+                "success": True,
+                "message": f"创建成功 (任务 #{created_tid})" if created_tid else msg
+            })
+        else:
+            failed_count += 1
+            results.append({
+                "index": idx,
+                "id": None,
+                "name": name,
+                "project_id": task_proj_id,
+                "success": False,
+                "message": msg
+            })
+
+    # 尝试反查提取新创建的任务 ID
+    try:
+        latest_tasks = client.get_my_tasks(view_type="assignedTo", fetch_all=True)
+        tasks_map_by_name = {t.get('name', '').strip(): str(t.get('id')) for t in latest_tasks if t.get('name')}
+        for r in results:
+            if r.get('success') and not r.get('id'):
+                matched_id = tasks_map_by_name.get(r['name'].strip())
+                if matched_id:
+                    r['id'] = matched_id
+                    r['message'] = f"创建成功 (任务 #{matched_id})"
+    except Exception:
+        pass
+
+    return jsonify({
+        "code": 200,
+        "success": True,
+        "message": f"直接导入完成：成功 {success_count} 项，失败 {failed_count} 项",
+        "total": len(tasks),
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "project_id": target_project_id,
+        "project_name": target_project_name or f"项目 #{target_project_id}",
+        "zentao_base_url": client.base_url,
+        "results": results
+    })
 
 
 if __name__ == '__main__':

@@ -49,6 +49,7 @@ zentao_config.ini
 *.csv
 # Generated docs
 generated_docs/
+gitee_config.json
 
 .DS_Store
 Thumbs.db

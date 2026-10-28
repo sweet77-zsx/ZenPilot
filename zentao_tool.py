@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 禅道自动化运维工具 (ZenTao Automation Tool)
-专为博科国信云禅道 (bkgtsoft.chandao.com) 及标准禅道系统定制。
+专为企业云禅道及标准禅道系统定制。
 支持功能：
 1. 查询待办任务列表 (支持按指派人、项目、执行筛选)
 2. 一键完成任务并自动报工 (自动处理未开始->进行中->完成)
@@ -296,7 +296,7 @@ def print_task_table(tasks, title):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="博科国信禅道任务自动化工具")
+    parser = argparse.ArgumentParser(description="禅道任务自动化工具")
     subparsers = parser.add_subparsers(dest="action", help="命令操作列表")
 
     # list 命令

@@ -165,7 +165,7 @@ AGENT_TOOLS = [
                 "properties": {
                     "title": {
                         "type": "string",
-                        "description": "文档的标题，例如：'王淋淼_本周研发工作周报'、'禅道待办任务梳理与复盘总结'。"
+                        "description": "文档的标题，例如：'张开发_本周研发工作周报'、'禅道待办任务梳理与复盘总结'。"
                     },
                     "content": {
                         "type": "string",
